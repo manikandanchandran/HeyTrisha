@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>React Test</title>
+    <!-- ✅ Ensure React 18 is Loaded -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+</head>
+<body>
+    <h1>Hello, this is a test page!</h1>
+    <div id="chatbot-root" style="border: 1px solid #ccc; padding: 20px;"></div>
+    
+    <script>
+        console.log("Loading React...");
+
+        const chatbotRoot = document.getElementById("chatbot-root");
+        if (!chatbotRoot) {
+            console.error("Chatbot root div not found");
+        } else {
+            console.log("Chatbot root div found");
+        }
+
+        function ChatWidget() {
+            return React.createElement('div', { style: { padding: "10px", background: "#f0f0f0" } }, "Hello from React!");
+        }
+
+        if (chatbotRoot) {
+            console.log("Creating React root...");
+            const root = ReactDOM.createRoot(chatbotRoot);  // ✅ React 18 version
+            root.render(React.createElement(ChatWidget));
+            console.log("Chatbot rendered!");
+        } else {
+            console.error("React could not render because #chatbot-root was missing");
+        }
+    </script>
+</body>
+</html>
