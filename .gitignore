@@ -1,0 +1,70 @@
+# WordPress Plugin
+.DS_Store
+Thumbs.db
+*.log
+
+# Laravel API
+api/.env
+api/.env.backup
+api/.env.production
+api/storage/*.key
+api/storage/logs/*.log
+api/storage/framework/cache/*
+api/storage/framework/sessions/*
+api/storage/framework/views/*
+api/bootstrap/cache/*
+!api/storage/.gitignore
+!api/storage/logs/.gitignore
+!api/storage/framework/.gitignore
+!api/storage/framework/cache/.gitignore
+!api/storage/framework/sessions/.gitignore
+!api/storage/framework/views/.gitignore
+!api/bootstrap/cache/.gitignore
+
+# Composer
+api/vendor/
+api/composer.lock
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+
+# React Build
+chatbot/
+assets/js/chatbot-react-app/node_modules/
+assets/js/chatbot-react-app/build/
+assets/js/chatbot-react-app/.env
+assets/js/chatbot-react-app/.env.local
+assets/js/chatbot-react-app/.env.development.local
+assets/js/chatbot-react-app/.env.test.local
+assets/js/chatbot-react-app/.env.production.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Server
+api/storage/server.pid
+api/storage/server.log
+
+# Test files
+test-page.html
+

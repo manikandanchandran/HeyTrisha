@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test React Chatbot</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+<body>
+    <h1>React Test Page</h1>
+    <div id="chatbot-root"></div>
+
+    <script>
+        console.log("✅ test.html loaded...");
+
+        // Load the React script dynamically
+        var script = document.createElement("script");
+        script.src = "./build/static/js/main.77748072.chunk.js";  // Load from the build folder
+        script.onload = function() {
+            console.log("✅ main.js loaded, now waiting for ChatWidget...");
+
+            // Wait until ChatWidget is available
+            var checkChatWidget = setInterval(() => {
+                if (window.ChatWidget) {
+                    clearInterval(checkChatWidget);
+                    console.log("✅ ChatWidget is now available! Rendering...");
+
+                    const chatbotRoot = document.getElementById("chatbot-root");
+                    const root = ReactDOM.createRoot(chatbotRoot);
+                    root.render(React.createElement(window.ChatWidget));
+                } else {
+                    console.log("⏳ Waiting for ChatWidget...");
+                }
+            }, 500);
+        };
+        document.body.appendChild(script);
+    </script>
+</body>
+</html>
