@@ -58,11 +58,13 @@ function heytrisha_register_admin_menu() {
 }
 add_action('admin_menu', 'heytrisha_register_admin_menu');
 
-// ✅ Include Server Manager
+// ✅ Include Server Manager and Dependency Installer
 require_once plugin_dir_path(__FILE__) . 'includes/class-heytrisha-server-manager.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-heytrisha-dependency-installer.php';
 
-// ✅ Create default options on activation
+// ✅ Create default options on activation and install dependencies
 function heytrisha_activate_plugin() {
+    // Create default options
     add_option('heytrisha_openai_api_key', '');
     add_option('heytrisha_db_host', '127.0.0.1');
     add_option('heytrisha_db_port', '3306');
@@ -76,10 +78,18 @@ function heytrisha_activate_plugin() {
         add_option('heytrisha_shared_token', wp_generate_password(32, false, false));
     }
     
+    // ✅ Install Laravel and React dependencies automatically
+    $installer = new HeyTrisha_Dependency_Installer();
+    $installation_result = $installer->install_all_dependencies();
+    
+    // Store installation result for display
+    update_option('heytrisha_installation_result', $installation_result);
+    update_option('heytrisha_installation_time', current_time('mysql'));
+    
     // ✅ Auto-start Laravel server on activation (non-blocking)
     // Use wp_schedule_single_event to start server asynchronously
     if (!wp_next_scheduled('heytrisha_start_server_on_activation')) {
-        wp_schedule_single_event(time() + 1, 'heytrisha_start_server_on_activation');
+        wp_schedule_single_event(time() + 5, 'heytrisha_start_server_on_activation'); // Delay to allow dependencies to install
     }
 }
 register_activation_hook(__FILE__, 'heytrisha_activate_plugin');
@@ -188,6 +198,33 @@ function heytrisha_ajax_restart_server() {
 }
 add_action('wp_ajax_heytrisha_restart_server', 'heytrisha_ajax_restart_server');
 
+function heytrisha_ajax_reinstall_dependencies() {
+    check_ajax_referer('heytrisha_server_action', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Unauthorized']);
+    }
+    
+    $installer = new HeyTrisha_Dependency_Installer();
+    $result = $installer->install_all_dependencies();
+    
+    // Store installation result
+    update_option('heytrisha_installation_result', $result);
+    update_option('heytrisha_installation_time', current_time('mysql'));
+    
+    if ($result['success']) {
+        wp_send_json_success([
+            'message' => 'Dependencies installed successfully!',
+            'details' => $result
+        ]);
+    } else {
+        wp_send_json_error([
+            'message' => 'Dependencies installation completed with errors. Check the status below.',
+            'details' => $result
+        ]);
+    }
+}
+add_action('wp_ajax_heytrisha_reinstall_dependencies', 'heytrisha_ajax_reinstall_dependencies');
+
 // ✅ Auto-start server on admin page load (if not running) - Non-blocking
 function heytrisha_auto_start_server() {
     if (!current_user_can('manage_options')) {
@@ -268,6 +305,55 @@ function heytrisha_render_settings_page() {
     echo '<td><input type="text" id="heytrisha_shared_token" name="heytrisha_shared_token" value="' . esc_attr($shared_token) . '" class="regular-text" /></td></tr>';
     echo '</tbody></table>';
 
+    // ✅ Dependency Installation Status
+    $installer = new HeyTrisha_Dependency_Installer();
+    $install_status = $installer->get_installation_status();
+    $installation_result = get_option('heytrisha_installation_result', null);
+    
+    echo '<h2>Dependency Installation Status</h2>';
+    echo '<div class="heytrisha-install-status" style="background: #f0f0f1; padding: 15px; border-radius: 4px; margin-bottom: 15px;">';
+    
+    if ($installation_result) {
+        echo '<h3 style="margin-top: 0;">Last Installation Result</h3>';
+        if ($installation_result['success']) {
+            echo '<p style="color: #00a32a; font-weight: bold;">✓ Installation completed successfully</p>';
+        } else {
+            echo '<p style="color: #d63638; font-weight: bold;">⚠ Installation completed with some warnings</p>';
+        }
+        
+        if (!empty($installation_result['messages'])) {
+            echo '<ul style="margin-left: 20px;">';
+            foreach ($installation_result['messages'] as $message) {
+                echo '<li>' . esc_html($message) . '</li>';
+            }
+            echo '</ul>';
+        }
+        
+        if (!empty($installation_result['errors'])) {
+            echo '<h4 style="color: #d63638;">Errors:</h4>';
+            echo '<ul style="margin-left: 20px; color: #d63638;">';
+            foreach ($installation_result['errors'] as $error) {
+                echo '<li>' . esc_html($error) . '</li>';
+            }
+            echo '</ul>';
+        }
+    }
+    
+    echo '<h3>Current Status</h3>';
+    echo '<ul style="margin-left: 20px;">';
+    echo '<li><strong>Laravel Dependencies:</strong> ' . ($install_status['laravel_installed'] ? '<span style="color: #00a32a;">✓ Installed</span>' : '<span style="color: #d63638;">✗ Not Installed</span>') . '</li>';
+    echo '<li><strong>Laravel App Key:</strong> ' . ($install_status['laravel_key_exists'] ? '<span style="color: #00a32a;">✓ Generated</span>' : '<span style="color: #d63638;">✗ Not Generated</span>') . '</li>';
+    echo '<li><strong>React Dependencies:</strong> ' . ($install_status['react_installed'] ? '<span style="color: #00a32a;">✓ Installed</span>' : '<span style="color: #d63638;">✗ Not Installed (Optional - React loaded from CDN)</span>') . '</li>';
+    echo '<li><strong>Composer Available:</strong> ' . ($install_status['composer_available'] ? '<span style="color: #00a32a;">✓ Yes</span>' : '<span style="color: #d63638;">✗ No</span>') . '</li>';
+    echo '<li><strong>npm Available:</strong> ' . ($install_status['npm_available'] ? '<span style="color: #00a32a;">✓ Yes</span>' : '<span style="color: #d63638;">✗ No (Optional)</span>') . '</li>';
+    echo '</ul>';
+    
+    echo '<p>';
+    echo '<button type="button" class="button button-secondary" onclick="heytrishaReinstallDependencies()">🔄 Reinstall Dependencies</button>';
+    echo '</p>';
+    
+    echo '</div>';
+
     // ✅ Server Management Section
     echo '<h2>API Server Management</h2>';
     $server_manager = new HeyTrisha_Server_Manager();
@@ -324,6 +410,20 @@ function heytrisha_render_settings_page() {
             alert(response.data.message);
             if (response.success) {
                 location.reload();
+            }
+        });
+    }
+    function heytrishaReinstallDependencies() {
+        if (!confirm("This will reinstall all Laravel and React dependencies. This may take a few minutes. Continue?")) return;
+        jQuery.post(ajaxurl, {
+            action: "heytrisha_reinstall_dependencies",
+            nonce: "' . wp_create_nonce('heytrisha_server_action') . '"
+        }, function(response) {
+            if (response.success) {
+                alert("Dependencies installation completed! Check the status below.");
+                location.reload();
+            } else {
+                alert("Error: " + (response.data.message || "Unknown error"));
             }
         });
     }
