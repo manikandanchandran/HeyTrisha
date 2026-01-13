@@ -1,0 +1,231 @@
+/**
+ * Hey Trisha - Terms and Conditions Activation Modal Styles
+ */
+
+/* Modal Overlay */
+.heytrisha-terms-modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    z-index: 100000;
+    overflow-y: auto;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.heytrisha-terms-modal-overlay.active {
+    display: block;
+}
+
+/* Modal Content */
+.heytrisha-terms-modal-content {
+    position: relative;
+    max-width: 700px;
+    margin: 50px auto;
+    background: #fff;
+    border-radius: 4px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    animation: heytrisha-modal-slide-in 0.3s ease-out;
+}
+
+@keyframes heytrisha-modal-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-50px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Modal Header */
+.heytrisha-terms-modal-header {
+    padding: 20px 25px;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #f9f9f9;
+    border-radius: 4px 4px 0 0;
+}
+
+.heytrisha-terms-modal-header h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: #23282d;
+}
+
+.heytrisha-terms-modal-close {
+    background: none;
+    border: none;
+    font-size: 28px;
+    line-height: 1;
+    color: #666;
+    cursor: pointer;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    transition: all 0.2s;
+}
+
+.heytrisha-terms-modal-close:hover {
+    background: #ddd;
+    color: #000;
+}
+
+/* Modal Body */
+.heytrisha-terms-modal-body {
+    padding: 25px;
+    max-height: calc(100vh - 250px);
+    overflow-y: auto;
+}
+
+/* Security Warning */
+.heytrisha-terms-warning {
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-left: 4px solid #ffc107;
+    padding: 15px;
+    margin-bottom: 20px;
+    border-radius: 4px;
+}
+
+.heytrisha-terms-warning strong {
+    color: #856404;
+    display: block;
+    margin-bottom: 10px;
+    font-size: 14px;
+}
+
+.heytrisha-terms-warning p {
+    margin: 8px 0;
+    color: #856404;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.heytrisha-terms-warning p:first-of-type {
+    margin-top: 0;
+}
+
+.heytrisha-terms-warning p:last-of-type {
+    margin-bottom: 0;
+}
+
+.heytrisha-terms-warning strong {
+    font-weight: 600;
+}
+
+/* Terms Content */
+.heytrisha-terms-content {
+    margin-bottom: 20px;
+}
+
+.heytrisha-terms-content p {
+    margin: 12px 0;
+    color: #555;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.heytrisha-terms-content ul {
+    margin: 15px 0;
+    padding-left: 25px;
+    color: #555;
+    font-size: 14px;
+    line-height: 1.8;
+}
+
+.heytrisha-terms-content ul li {
+    margin: 8px 0;
+}
+
+.heytrisha-terms-content a {
+    color: #2271b1;
+    text-decoration: none;
+}
+
+.heytrisha-terms-content a:hover {
+    color: #135e96;
+    text-decoration: underline;
+}
+
+/* Checkbox */
+.heytrisha-terms-checkbox {
+    margin: 25px 0;
+    padding: 15px;
+    background: #f9f9f9;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.heytrisha-terms-checkbox label {
+    display: flex;
+    align-items: flex-start;
+    cursor: pointer;
+    font-size: 14px;
+    color: #23282d;
+    line-height: 1.5;
+}
+
+.heytrisha-terms-checkbox input[type="checkbox"] {
+    margin: 3px 10px 0 0;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.heytrisha-terms-checkbox span {
+    flex: 1;
+}
+
+/* Modal Footer */
+.heytrisha-terms-modal-footer {
+    padding: 15px 25px;
+    border-top: 1px solid #ddd;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    background: #f9f9f9;
+    border-radius: 0 0 4px 4px;
+}
+
+.heytrisha-terms-modal-footer .button {
+    min-width: 100px;
+}
+
+.heytrisha-terms-activate:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Responsive */
+@media (max-width: 782px) {
+    .heytrisha-terms-modal-content {
+        max-width: 95%;
+        margin: 20px auto;
+    }
+    
+    .heytrisha-terms-modal-header,
+    .heytrisha-terms-modal-body,
+    .heytrisha-terms-modal-footer {
+        padding: 15px;
+    }
+    
+    .heytrisha-terms-modal-header h2 {
+        font-size: 18px;
+    }
+}
+
+
