@@ -49,16 +49,27 @@ Hey Trisha is an intelligent AI-powered chatbot for WordPress and WooCommerce th
 * OpenAI API key ([Get one here](https://platform.openai.com/))
 * **For Development:** Composer (automatically handled on shared hosting)
 
+= How It Processes Queries =
+
+When you ask a question, the plugin:
+
+1. Sends your natural language query to OpenAI's API
+2. OpenAI generates appropriate database queries or WordPress REST API requests
+3. The plugin executes these queries **locally** on your WordPress site
+4. Results are formatted and displayed in the chat interface
+
+**Important Security Note:** The plugin never sends your actual database content to external services during query generation. Only your question and the database structure (table/column names) are shared with OpenAI to understand your intent.
+
 = Shared Hosting Support =
 
-This plugin works seamlessly on shared hosting environments! All Laravel dependencies are pre-installed in the package. Simply:
+This plugin works seamlessly on shared hosting environments! All dependencies (Laravel framework) are bundled with the plugin and run through your existing web server. Simply:
 
 1. Upload the plugin
 2. Activate it
-3. Configure your settings
+3. Configure your OpenAI API key and database settings
 4. Start chatting!
 
-No command-line access or Composer installation required on your server.
+No command-line access, Composer installation, or separate server required.
 
 == Installation ==
 
@@ -103,11 +114,19 @@ Yes! The plugin is specifically optimized for shared hosting environments. All d
 
 = What data does the chatbot have access to? =
 
-The chatbot can access your WordPress database and perform actions through the WordPress REST API. It only works for administrators and respects WordPress permissions.
+The chatbot can access your WordPress database (using the credentials you provide in settings) and perform actions through the WordPress REST API. Important notes:
+* Only administrators can use the chatbot (requires 'manage_options' capability)
+* We strongly recommend configuring read-only database credentials to prevent any modifications
+* All queries are executed locally on your server - no database content is sent to external services
 
 = Is my data secure? =
 
-Yes! Your database credentials are stored securely in WordPress options. The OpenAI API only receives the necessary schema and query information, not your actual data.
+Yes! Security measures include:
+* Database credentials are stored in an encrypted database table (not plain text)
+* OpenAI API only receives your query and database schema (table/column names), not actual data content
+* All database queries are executed locally on your WordPress server
+* Administrator-only access with proper WordPress capability checks
+* We recommend using read-only database credentials for additional security
 
 = Does this require a separate server? =
 
@@ -151,9 +170,52 @@ The AI will provide a helpful response and suggest what kinds of questions you c
 = 1.0.0 =
 Initial release of Hey Trisha chatbot plugin.
 
+== External Services ==
+
+This plugin relies on the following third-party external services:
+
+= OpenAI API =
+
+**What it is:** Hey Trisha uses OpenAI's GPT models to process natural language queries and generate intelligent responses.
+
+**What data is sent:**
+* Your natural language query/question
+* Database schema information (table names and column names only, not actual data)
+* Context about the type of operation requested
+
+**When data is sent:**
+* Each time you submit a query through the chatbot interface
+* Data is only sent when an administrator actively uses the chatbot
+
+**Service Provider:** OpenAI, L.L.C.
+* [Terms of Use](https://openai.com/terms/)
+* [Privacy Policy](https://openai.com/privacy/)
+* [API Terms](https://openai.com/policies/api-terms/)
+
+= Hey Trisha Website =
+
+**What it is:** The plugin author's website provides documentation, terms and conditions, and support information.
+
+**What data is sent:** No data is sent to heytrisha.com during plugin operation. The website is only linked for informational purposes (Terms and Conditions, support).
+
+* [Terms and Conditions](https://heytrisha.com/terms-and-conditions)
+* [Website](https://heytrisha.com)
+
 == Privacy Policy ==
 
-This plugin sends database schema information and user queries to OpenAI's API for processing. No actual database content is sent unless specifically queried. Your OpenAI API key and database credentials are stored locally in your WordPress database and never transmitted to third parties except OpenAI for query processing.
+This plugin sends database schema information (table names and column structure only) and user queries to OpenAI's API for natural language processing. The actual content of your database records is only sent when you specifically query for that data.
+
+**Data Storage:**
+* Your OpenAI API key is stored securely in an encrypted database table
+* Database credentials are stored locally and are never transmitted to any third party
+* Chat history is stored locally in your WordPress database
+
+**User Tracking:**
+* This plugin does not track users
+* No analytics or telemetry data is collected
+* All processing happens between your WordPress site and OpenAI's API
+
+**Important:** For security, we strongly recommend using read-only database credentials when configuring this plugin.
 
 == Support ==
 

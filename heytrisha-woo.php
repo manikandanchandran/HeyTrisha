@@ -60,24 +60,37 @@ if ($is_rest_api_request) {
                     header('Content-Type: application/json');
                 }
                 
-                echo json_encode([
+                // Use wp_json_encode and sanitize error details to prevent information disclosure
+                echo wp_json_encode([
                     'success' => false,
                     'message' => 'Internal server error',
-                    'error' => $error['message'],
-                    'file' => $error['file'] . ':' . $error['line'],
+                    'error' => esc_html(substr($error['message'], 0, 200)), // Limit error message length
+                    'file' => esc_html(basename($error['file'])) . ':' . absint($error['line']), // Only show filename, not full path
                     'type' => 'FatalError'
-                ], JSON_PRETTY_PRINT);
+                ]);
                 exit;
             }
         }
     });
     
     // Start output buffering immediately to catch any stray output
-    // Clean any existing buffers first
+    // Clean any existing buffers first, then start a fresh one
+    // This buffer is closed by:
+    // 1. The shutdown function above (on fatal errors)
+    // 2. The rest_pre_serve_request filter (on successful responses)
+    // 3. The heytrisha_proxy_laravel_api function (during API processing)
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
     ob_start();
+    
+    // Register cleanup function to ensure buffer is always closed
+    register_shutdown_function(function() {
+        // Clean any remaining buffers on shutdown
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+    });
 }
 
 // Define plugin constants
@@ -103,9 +116,9 @@ function heytrisha_enqueue_chatbot() {
         return;
     }
     
-    // ✅ Load React from CDN
-    wp_enqueue_script('react', 'https://unpkg.com/react@18/umd/react.production.min.js', [], '18.0', true);
-    wp_enqueue_script('react-dom', 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js', ['react'], '18.0', true);
+    // ✅ Load React locally (bundled with plugin per WordPress guidelines)
+    wp_enqueue_script('react', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react.production.min.js', [], '18.0', true);
+    wp_enqueue_script('react-dom', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react-dom.production.min.js', ['react'], '18.0', true);
     
     // ✅ Load Chatbot CSS
     wp_enqueue_style('heytrisha-chatbot-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chatbot.css', [], HEYTRISHA_VERSION);
@@ -135,8 +148,8 @@ add_action('admin_enqueue_scripts', 'heytrisha_enqueue_chatbot');
 
 // ✅ AJAX handler to save Terms and Conditions acceptance
 function heytrisha_ajax_accept_terms() {
-    // Verify nonce
-    if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'heytrisha_accept_terms')) {
+    // Verify nonce (sanitized as per WordPress plugin guidelines)
+    if (!isset($_POST['nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['nonce'])), 'heytrisha_accept_terms')) {
         wp_send_json_error([
             'message' => 'Security check failed. Please refresh the page and try again.'
         ]);
@@ -314,9 +327,10 @@ if (version_compare($wp_version, HEYTRISHA_MIN_WP_VERSION, '<')) {
 function heytrisha_php_version_notice() {
     echo '<div class="error"><p>';
     echo sprintf(
-        esc_html__('Hey Trisha requires PHP version %s or higher. You are running PHP %s. Please upgrade PHP.', 'heytrisha-woo'),
-        HEYTRISHA_MIN_PHP_VERSION,
-        PHP_VERSION
+        /* translators: 1: Required PHP version, 2: Current PHP version */
+        esc_html__('Hey Trisha requires PHP version %1$s or higher. You are running PHP %2$s. Please upgrade PHP.', 'heytrisha-woo'),
+        esc_html(HEYTRISHA_MIN_PHP_VERSION),
+        esc_html(PHP_VERSION)
     );
     echo '</p></div>';
 }
@@ -326,9 +340,10 @@ function heytrisha_wp_version_notice() {
     global $wp_version;
     echo '<div class="error"><p>';
     echo sprintf(
-        esc_html__('Hey Trisha requires WordPress version %s or higher. You are running WordPress %s. Please upgrade WordPress.', 'heytrisha-woo'),
-        HEYTRISHA_MIN_WP_VERSION,
-        $wp_version
+        /* translators: 1: Required WordPress version, 2: Current WordPress version */
+        esc_html__('Hey Trisha requires WordPress version %1$s or higher. You are running WordPress %2$s. Please upgrade WordPress.', 'heytrisha-woo'),
+        esc_html(HEYTRISHA_MIN_WP_VERSION),
+        esc_html($wp_version)
     );
     echo '</p></div>';
 }
@@ -484,6 +499,30 @@ function heytrisha_activate_plugin() {
 }
 register_activation_hook(__FILE__, 'heytrisha_activate_plugin');
 
+// ✅ Helper function to sanitize confirmation_data array recursively
+function heytrisha_sanitize_confirmation_data($data) {
+    if (!is_array($data)) {
+        return is_string($data) ? sanitize_text_field($data) : $data;
+    }
+    
+    $sanitized = array();
+    foreach ($data as $key => $value) {
+        $safe_key = sanitize_key($key);
+        if (is_array($value)) {
+            $sanitized[$safe_key] = heytrisha_sanitize_confirmation_data($value);
+        } elseif (is_string($value)) {
+            $sanitized[$safe_key] = sanitize_text_field($value);
+        } elseif (is_numeric($value)) {
+            $sanitized[$safe_key] = is_float($value) ? floatval($value) : intval($value);
+        } elseif (is_bool($value)) {
+            $sanitized[$safe_key] = (bool) $value;
+        } else {
+            $sanitized[$safe_key] = $value;
+        }
+    }
+    return $sanitized;
+}
+
 // ✅ Helper function to get secure credential with fallback to wp_options
 function heytrisha_get_credential($key, $option_name, $default = '') {
     // Try to get from secure storage first
@@ -573,7 +612,7 @@ function heytrisha_handle_settings_save() {
         return;
     }
 
-    if (!isset($_POST['heytrisha_settings_nonce']) || !wp_verify_nonce($_POST['heytrisha_settings_nonce'], 'heytrisha_save_settings')) {
+    if (!isset($_POST['heytrisha_settings_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['heytrisha_settings_nonce'])), 'heytrisha_save_settings')) {
         return;
     }
 
@@ -1102,9 +1141,9 @@ function heytrisha_render_new_chat_page() {
     
     $chat_id = isset($_GET['chat_id']) ? intval($_GET['chat_id']) : 0;
     
-    // Enqueue chat interface scripts
-    wp_enqueue_script('react', 'https://unpkg.com/react@18/umd/react.production.min.js', [], '18.0', true);
-    wp_enqueue_script('react-dom', 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js', ['react'], '18.0', true);
+    // Enqueue chat interface scripts (React bundled locally per WordPress guidelines)
+    wp_enqueue_script('react', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react.production.min.js', [], '18.0', true);
+    wp_enqueue_script('react-dom', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react-dom.production.min.js', ['react'], '18.0', true);
     wp_enqueue_style('heytrisha-chat-admin-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chat-admin.css', [], HEYTRISHA_VERSION);
     wp_enqueue_script('heytrisha-chat-admin-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chat-admin.js', ['react', 'react-dom'], HEYTRISHA_VERSION, true);
     
@@ -1217,81 +1256,75 @@ function heytrisha_proxy_laravel_api($request) {
     $_SERVER['QUERY_STRING'] = '';
     
     // ✅ Build request body for Laravel (from request object or POST data)
+    // All inputs are sanitized before use
     $request_body = array();
     
-    // ✅ Log what we received for debugging
-    error_log("🔍 Proxy Debug - query: " . var_export($query, true));
-    error_log("🔍 Proxy Debug - confirmed: " . var_export($confirmed, true));
-    error_log("🔍 Proxy Debug - _POST: " . json_encode($_POST));
-    error_log("🔍 Proxy Debug - request->query: " . (isset($request->query) ? var_export($request->query, true) : 'not set'));
-    error_log("🔍 Proxy Debug - request->body: " . (isset($request->body) ? json_encode($request->body) : 'not set'));
-    
-    // ✅ Extract query - prioritize request object, then POST, then body
+    // ✅ Extract query - prioritize request object, then POST, then body (all sanitized)
     if ($query !== null && $query !== '') {
-        $request_body['query'] = $query;
+        $request_body['query'] = sanitize_text_field($query);
     } elseif (isset($request->body['query']) && $request->body['query'] !== '') {
-        $request_body['query'] = $request->body['query'];
+        $request_body['query'] = sanitize_text_field($request->body['query']);
     } elseif (isset($_POST['query']) && $_POST['query'] !== '') {
-        $request_body['query'] = $_POST['query'];
+        $request_body['query'] = sanitize_text_field(wp_unslash($_POST['query']));
     }
     
-    // ✅ Extract confirmed flag
+    // ✅ Extract confirmed flag (boolean validation)
     if ($confirmed !== false && $confirmed !== null) {
-        $request_body['confirmed'] = $confirmed;
+        $request_body['confirmed'] = (bool) $confirmed;
     } elseif (isset($request->body['confirmed'])) {
-        $request_body['confirmed'] = $request->body['confirmed'];
+        $request_body['confirmed'] = (bool) $request->body['confirmed'];
     } elseif (isset($_POST['confirmed'])) {
-        $request_body['confirmed'] = filter_var($_POST['confirmed'], FILTER_VALIDATE_BOOLEAN);
+        $request_body['confirmed'] = filter_var(wp_unslash($_POST['confirmed']), FILTER_VALIDATE_BOOLEAN);
     }
     
-    // ✅ Extract confirmation_data
+    // ✅ Extract confirmation_data (sanitized)
     if ($confirmation_data !== null) {
-        $request_body['confirmation_data'] = $confirmation_data;
+        $request_body['confirmation_data'] = is_array($confirmation_data) 
+            ? heytrisha_sanitize_confirmation_data($confirmation_data) 
+            : sanitize_text_field($confirmation_data);
     } elseif (isset($request->body['confirmation_data'])) {
-        $request_body['confirmation_data'] = $request->body['confirmation_data'];
+        $request_body['confirmation_data'] = is_array($request->body['confirmation_data']) 
+            ? heytrisha_sanitize_confirmation_data($request->body['confirmation_data']) 
+            : sanitize_text_field($request->body['confirmation_data']);
     } elseif (isset($_POST['confirmation_data'])) {
-        // If it's a JSON string, decode it
+        // If it's a JSON string, decode and sanitize it
         if (is_string($_POST['confirmation_data'])) {
-            $decoded = json_decode($_POST['confirmation_data'], true);
-            if (json_last_error() === JSON_ERROR_NONE) {
-                $request_body['confirmation_data'] = $decoded;
+            $decoded = json_decode(wp_unslash($_POST['confirmation_data']), true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $request_body['confirmation_data'] = heytrisha_sanitize_confirmation_data($decoded);
             } else {
-                $request_body['confirmation_data'] = $_POST['confirmation_data'];
+                $request_body['confirmation_data'] = sanitize_text_field(wp_unslash($_POST['confirmation_data']));
             }
         } else {
-            $request_body['confirmation_data'] = $_POST['confirmation_data'];
+            $request_body['confirmation_data'] = is_array($_POST['confirmation_data']) 
+                ? heytrisha_sanitize_confirmation_data($_POST['confirmation_data']) 
+                : sanitize_text_field(wp_unslash($_POST['confirmation_data']));
         }
     }
     
-    // ✅ If still no query, try to get from php://input
+    // ✅ If still no query, try to get from php://input (sanitized)
     if (empty($request_body['query'])) {
         $input = file_get_contents('php://input');
         if (!empty($input)) {
             $decoded = json_decode($input, true);
             if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
                 if (isset($decoded['query']) && $decoded['query'] !== '') {
-                    $request_body['query'] = $decoded['query'];
+                    $request_body['query'] = sanitize_text_field($decoded['query']);
                 }
-                // Merge other fields if not already set
+                // Merge other fields if not already set (sanitized)
                 if (!isset($request_body['confirmed']) && isset($decoded['confirmed'])) {
-                    $request_body['confirmed'] = $decoded['confirmed'];
+                    $request_body['confirmed'] = (bool) $decoded['confirmed'];
                 }
                 if (!isset($request_body['confirmation_data']) && isset($decoded['confirmation_data'])) {
-                    $request_body['confirmation_data'] = $decoded['confirmation_data'];
+                    $request_body['confirmation_data'] = is_array($decoded['confirmation_data']) 
+                        ? heytrisha_sanitize_confirmation_data($decoded['confirmation_data']) 
+                        : sanitize_text_field($decoded['confirmation_data']);
                 }
             }
         }
     }
     
-    // ✅ Final validation - ensure query exists
-    if (empty($request_body['query'])) {
-        error_log("❌ ERROR: Query is empty after all extraction attempts!");
-        error_log("❌ Debug - request_body: " . json_encode($request_body));
-        error_log("❌ Debug - _POST: " . json_encode($_POST));
-        error_log("❌ Debug - request object: " . print_r($request, true));
-    } else {
-        error_log("✅ Query extracted successfully: '{$request_body['query']}'");
-    }
+    // Validation handled - no debug logging of sensitive data
     
     // Set up $_POST and php://input for Laravel
     $_POST = $request_body;
@@ -1561,16 +1594,17 @@ add_filter('wp_die_handler', function($handler) {
             
             $error_data = [
                 'success' => false,
-                'message' => is_string($message) ? $message : 'Internal server error',
+                'message' => is_string($message) ? sanitize_text_field($message) : 'Internal server error',
             ];
             
             // Include error details if available
             if (is_wp_error($message)) {
-                $error_data['error'] = $message->get_error_message();
-                $error_data['code'] = $message->get_error_code();
+                $error_data['error'] = sanitize_text_field($message->get_error_message());
+                $error_data['code'] = sanitize_key($message->get_error_code());
             }
             
-            echo json_encode($error_data, JSON_PRETTY_PRINT);
+            // Use wp_json_encode for proper escaping
+            echo wp_json_encode($error_data);
             exit;
         };
     }
@@ -1812,35 +1846,56 @@ function heytrisha_ajax_query_handler() {
         // ✅ Get the request body (prioritize POST data for admin-ajax.php, fallback to JSON)
         $request_data = array();
         
-        // First try POST data (standard WordPress AJAX)
+        // First try POST data (standard WordPress AJAX) - sanitize all inputs
         if (!empty($_POST)) {
-            $request_data = $_POST;
+            // Sanitize each field individually
+            if (isset($_POST['query'])) {
+                $request_data['query'] = sanitize_text_field(wp_unslash($_POST['query']));
+            }
+            if (isset($_POST['endpoint'])) {
+                $request_data['endpoint'] = sanitize_text_field(wp_unslash($_POST['endpoint']));
+            }
+            if (isset($_POST['confirmed'])) {
+                $request_data['confirmed'] = filter_var(wp_unslash($_POST['confirmed']), FILTER_VALIDATE_BOOLEAN);
+            }
+            if (isset($_POST['action'])) {
+                $request_data['action'] = sanitize_key($_POST['action']);
+            }
             
-            // If confirmation_data is a JSON string, decode it
-            if (isset($request_data['confirmation_data']) && is_string($request_data['confirmation_data'])) {
-                $decoded = json_decode($request_data['confirmation_data'], true);
+            // If confirmation_data is a JSON string, decode and validate it
+            if (isset($_POST['confirmation_data']) && is_string($_POST['confirmation_data'])) {
+                $decoded = json_decode(wp_unslash($_POST['confirmation_data']), true);
                 if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                    $request_data['confirmation_data'] = $decoded;
+                    // Sanitize decoded confirmation data
+                    $request_data['confirmation_data'] = heytrisha_sanitize_confirmation_data($decoded);
                 }
             }
         } else {
             // Fallback: Try JSON body (for backward compatibility)
             $json_body = file_get_contents('php://input');
-            $decoded = json_decode($json_body, true);
-            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                $request_data = $decoded;
+            if (!empty($json_body)) {
+                $decoded = json_decode($json_body, true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                    // Sanitize each field
+                    if (isset($decoded['query'])) {
+                        $request_data['query'] = sanitize_text_field($decoded['query']);
+                    }
+                    if (isset($decoded['endpoint'])) {
+                        $request_data['endpoint'] = sanitize_text_field($decoded['endpoint']);
+                    }
+                    if (isset($decoded['confirmed'])) {
+                        $request_data['confirmed'] = filter_var($decoded['confirmed'], FILTER_VALIDATE_BOOLEAN);
+                    }
+                    if (isset($decoded['confirmation_data']) && is_array($decoded['confirmation_data'])) {
+                        $request_data['confirmation_data'] = heytrisha_sanitize_confirmation_data($decoded['confirmation_data']);
+                    }
+                }
             }
         }
         
         // ✅ Validate query exists before proceeding
         if (empty($request_data['query']) || !is_string($request_data['query']) || trim($request_data['query']) === '') {
-            // Log the issue
-            error_log("❌ AJAX Handler - Empty or invalid query received");
-            error_log("❌ AJAX Handler - _POST: " . json_encode($_POST));
-            error_log("❌ AJAX Handler - request_data: " . json_encode($request_data));
-            error_log("❌ AJAX Handler - php://input: " . file_get_contents('php://input'));
-            
-            // Return error response
+            // Return error response (no sensitive data logging)
             wp_send_json(array(
                 'success' => false,
                 'message' => 'Please provide a valid query.'
@@ -1848,21 +1903,17 @@ function heytrisha_ajax_query_handler() {
             return;
         }
         
-        // ✅ Log successful query reception
-        error_log("✅ AJAX Handler - Query received: '{$request_data['query']}'");
-        
         // Create a WP_REST_Request compatible object
         $request = new stdClass();
-        $request->endpoint = isset($request_data['endpoint']) ? sanitize_text_field($request_data['endpoint']) : 'query';
+        $request->endpoint = isset($request_data['endpoint']) ? $request_data['endpoint'] : 'query';
         
-        // Store the full request body (contains query, confirmed, confirmation_data, etc.)
+        // Store the sanitized request body
         $request->body = $request_data;
         
         // For compatibility with the proxy function, add these as direct properties
-        // ✅ Ensure query is properly set (don't use isset, use direct assignment)
-        $request->query = isset($request_data['query']) ? $request_data['query'] : '';
+        $request->query = $request_data['query'];
         if (isset($request_data['confirmed'])) {
-            $request->confirmed = filter_var($request_data['confirmed'], FILTER_VALIDATE_BOOLEAN);
+            $request->confirmed = $request_data['confirmed'];
         }
         if (isset($request_data['confirmation_data'])) {
             $request->confirmation_data = $request_data['confirmation_data'];
@@ -1870,8 +1921,6 @@ function heytrisha_ajax_query_handler() {
         
         // ✅ Final validation - ensure query is set
         if (empty($request->query)) {
-            error_log("❌ AJAX Handler - Query not set in request object!");
-            error_log("❌ AJAX Handler - request_data: " . json_encode($request_data));
             wp_send_json(array(
                 'success' => false,
                 'message' => 'Query parameter is missing.'
@@ -2114,8 +2163,8 @@ add_action('rest_api_init', 'heytrisha_register_chat_rest_routes');
 //     if (current_user_can('administrator')) {
 
 //         // Enqueue React and ReactDOM from CDN (for admin only)
-//         wp_enqueue_script('react', 'https://unpkg.com/react@17/umd/react.production.min.js', [], null, true);
-//         wp_enqueue_script('react-dom', 'https://unpkg.com/react-dom@17/umd/react-dom.production.min.js', ['react'], null, true);
+//         wp_enqueue_script('react', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react.production.min.js', [], '18.0', true);
+//         wp_enqueue_script('react-dom', HEYTRISHA_PLUGIN_URL . 'assets/js/vendor/react-dom.production.min.js', ['react'], '18.0', true);
 
 //         // Enqueue CSS file for chatbot
 //         // wp_enqueue_style('chatbot-css', plugin_dir_url(__FILE__) . 'chatbot/static/css/main.css');
