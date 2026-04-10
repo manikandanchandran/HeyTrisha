@@ -1,47 +1,54 @@
-# WordPress Plugin
-.DS_Store
-Thumbs.db
+# WordPress plugin / general
 *.log
 
-# Laravel API
-api/.env
-api/.env.backup
-api/.env.production
-api/storage/*.key
-api/storage/logs/*.log
-api/storage/framework/cache/*
-api/storage/framework/sessions/*
-api/storage/framework/views/*
-api/bootstrap/cache/*
-!api/storage/.gitignore
-!api/storage/logs/.gitignore
-!api/storage/framework/.gitignore
-!api/storage/framework/cache/.gitignore
-!api/storage/framework/sessions/.gitignore
-!api/storage/framework/views/.gitignore
-!api/bootstrap/cache/.gitignore
+# Composer — any nested PHP project (api/, Wordpress/**/, etc.)
+vendor/
 
-# Composer
-api/vendor/
-api/composer.lock
+# Laravel / PHP — any nested app (matches api/, Wordpress/**/…, etc.)
+**/.env
+**/.env.*
+!**/.env.example
+**/.phpunit.result.cache
+**/.phpunit.cache
+**/storage/*.key
+**/storage/logs/*.log
+**/storage/framework/cache/*
+**/storage/framework/sessions/*
+**/storage/framework/views/*
+**/bootstrap/cache/*
+!**/storage/.gitignore
+!**/storage/logs/.gitignore
+!**/storage/framework/.gitignore
+!**/storage/framework/cache/.gitignore
+!**/storage/framework/sessions/.gitignore
+!**/storage/framework/views/.gitignore
+!**/bootstrap/cache/.gitignore
 
-# Node.js
+# Node — any nested package (root, api/, Wordpress/**/, assets/**/, etc.)
 node_modules/
-npm-debug.log
-yarn-error.log
-package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# React Build
+# Vite / Laravel Mix / public assets (any app)
+**/public/hot
+**/public/build
+**/public/storage
+**/auth.json
+Homestead.json
+Homestead.yaml
+
+# React build (this repo’s frontend)
 chatbot/
-assets/js/chatbot-react-app/node_modules/
 assets/js/chatbot-react-app/build/
 assets/js/chatbot-react-app/.env
-assets/js/chatbot-react-app/.env.local
-assets/js/chatbot-react-app/.env.development.local
-assets/js/chatbot-react-app/.env.test.local
-assets/js/chatbot-react-app/.env.production.local
+assets/js/chatbot-react-app/.env.*
+!assets/js/chatbot-react-app/.env.example
+assets/js/chatbot-react-app/coverage/
+*.tsbuildinfo
 
-# IDE
+# IDE / editors
 .idea/
 .vscode/
 *.swp
@@ -61,25 +68,19 @@ ehthumbs.db
 Thumbs.db
 Desktop.ini
 
-# Server
-api/storage/server.pid
-api/storage/server.log
+# Server / local process (api or copies under Wordpress/)
+**/storage/server.pid
+**/storage/server.log
 
-# Test files
+# Test / scratch
 test-page.html
+coverage/
+.phpunit.result.cache
 
 # Documentation and build scripts (exclude from git)
-
 *.ps1
 *.bat
 *.sh
 
-# Build/release directories
+# Build / release directories
 releases/
-
-
-
-
-
-
-
