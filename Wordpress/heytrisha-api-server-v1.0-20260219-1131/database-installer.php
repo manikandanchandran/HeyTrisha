@@ -164,68 +164,40 @@ try {
     $conn->select_db($db_name);
     $success[] = "✓ Database selected";
     
-    // Create sites table directly (embedded SQL)
-    $create_sites_table = "
-    CREATE TABLE IF NOT EXISTS `sites` (
-      `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      `site_url` VARCHAR(255) NOT NULL,
-      `api_key_hash` VARCHAR(64) NOT NULL,
-      `openai_key` TEXT NOT NULL COMMENT 'Encrypted OpenAI API key',
-      `email` VARCHAR(255) DEFAULT NULL,
-      `username` VARCHAR(255) DEFAULT NULL,
-      `password` VARCHAR(255) DEFAULT NULL COMMENT 'Hashed password',
-      `first_name` VARCHAR(255) DEFAULT NULL,
-      `last_name` VARCHAR(255) DEFAULT NULL,
-      `db_name` VARCHAR(255) DEFAULT NULL COMMENT 'WordPress database name',
-      `db_username` VARCHAR(255) DEFAULT NULL COMMENT 'WordPress database username',
-      `db_password` TEXT DEFAULT NULL COMMENT 'Encrypted WordPress database password',
-      `wordpress_version` VARCHAR(50) DEFAULT NULL,
-      `woocommerce_version` VARCHAR(50) DEFAULT NULL,
-      `plugin_version` VARCHAR(50) DEFAULT NULL,
-      `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-      `query_count` INT NOT NULL DEFAULT 0,
-      `last_query_at` TIMESTAMP NULL DEFAULT NULL,
-      `created_at` TIMESTAMP NULL DEFAULT NULL,
-      `updated_at` TIMESTAMP NULL DEFAULT NULL,
-      PRIMARY KEY (`id`),
-      UNIQUE KEY `sites_site_url_unique` (`site_url`),
-      UNIQUE KEY `sites_api_key_hash_unique` (`api_key_hash`),
-      UNIQUE KEY `sites_username_unique` (`username`),
-      KEY `sites_is_active_index` (`is_active`),
-      KEY `sites_created_at_index` (`created_at`),
-      KEY `sites_username_index` (`username`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    ";
-    
-    if ($conn->query($create_sites_table)) {
-        $success[] = "✓ Table 'sites' created";
-    } else {
-        if (strpos($conn->error, 'already exists') !== false) {
-            $success[] = "ℹ Table 'sites' already exists (skipped)";
-        } else {
-            $errors[] = "Error creating sites table: " . $conn->error;
-        }
+    // Apply schema from database/setup.sql so installer stays in sync
+    $setup_sql_path = __DIR__ . '/database/setup.sql';
+    if (!file_exists($setup_sql_path)) {
+        throw new Exception("Missing setup SQL file at: " . $setup_sql_path);
     }
-    
-    // Create migrations table
-    $create_migrations_table = "
-    CREATE TABLE IF NOT EXISTS `migrations` (
-      `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
-      `migration` VARCHAR(255) NOT NULL,
-      `batch` INT NOT NULL,
-      PRIMARY KEY (`id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    ";
-    
-    if ($conn->query($create_migrations_table)) {
-        $success[] = "✓ Table 'migrations' created";
-    } else {
-        if (strpos($conn->error, 'already exists') !== false) {
-            $success[] = "ℹ Table 'migrations' already exists (skipped)";
-        } else {
-            $errors[] = "Error creating migrations table: " . $conn->error;
-        }
+
+    $setup_sql = file_get_contents($setup_sql_path);
+    if ($setup_sql === false) {
+        throw new Exception("Unable to read setup SQL file at: " . $setup_sql_path);
     }
+
+    // Make setup.sql reusable regardless of database name
+    $setup_sql = str_replace('`heytrisha_api`', '`' . $conn->real_escape_string($db_name) . '`', $setup_sql);
+
+    // Remove CREATE DATABASE / USE statements (installer already creates/selects DB)
+    $setup_sql = preg_replace('/^\s*CREATE\s+DATABASE\b.*?;\s*$/mi', '', $setup_sql);
+    $setup_sql = preg_replace('/^\s*USE\s+`[^`]+`\s*;\s*$/mi', '', $setup_sql);
+
+    // Execute full schema (supports multiple CREATE TABLE statements)
+    if (!$conn->multi_query($setup_sql)) {
+        throw new Exception("Failed to run setup.sql: " . $conn->error);
+    }
+    do {
+        // flush results for each statement
+        if ($result = $conn->store_result()) {
+            $result->free();
+        }
+    } while ($conn->more_results() && $conn->next_result());
+
+    if ($conn->errno) {
+        throw new Exception("Error while executing setup.sql: " . $conn->error);
+    }
+
+    $success[] = "✓ Schema applied from database/setup.sql";
     
     // Verify tables were created
     $result = $conn->query("SHOW TABLES");

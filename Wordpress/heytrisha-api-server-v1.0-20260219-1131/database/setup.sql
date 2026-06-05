@@ -58,6 +58,47 @@ CREATE TABLE IF NOT EXISTS `migrations` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =====================================================
+-- HeyTrisha Specification Tables
+-- =====================================================
+
+-- Table: site_specification_chunks
+-- Stores chunked text + embeddings for retrieval per site/spec version
+CREATE TABLE IF NOT EXISTS `site_specification_chunks` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `site_id` BIGINT UNSIGNED NOT NULL,
+  `spec_version` VARCHAR(64) NOT NULL,
+  `chunk_index` SMALLINT UNSIGNED NOT NULL,
+  `content` TEXT NOT NULL,
+  `embedding` MEDIUMTEXT NULL,
+  `created_at` TIMESTAMP NULL DEFAULT NULL,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `spec_chunk_unique` (`site_id`, `spec_version`, `chunk_index`),
+  KEY `site_specification_chunks_site_id_index` (`site_id`),
+  KEY `site_specification_chunks_spec_version_index` (`spec_version`),
+  CONSTRAINT `site_specification_chunks_site_id_foreign`
+    FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table: site_specifications
+-- Stores latest per-site spec metadata + allowlist/rules
+CREATE TABLE IF NOT EXISTS `site_specifications` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `site_id` BIGINT UNSIGNED NOT NULL,
+  `spec_version` VARCHAR(64) NOT NULL,
+  `allowlist_json` MEDIUMTEXT NOT NULL,
+  `rules_summary` TEXT NULL,
+  `forbidden_tables_json` TEXT NULL,
+  `created_at` TIMESTAMP NULL DEFAULT NULL,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `site_specifications_site_id_unique` (`site_id`),
+  KEY `site_specifications_site_id_index` (`site_id`),
+  CONSTRAINT `site_specifications_site_id_foreign`
+    FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =====================================================
 -- Optional: Create database user for API
 -- =====================================================
 -- Uncomment and modify as needed:

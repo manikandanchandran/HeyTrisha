@@ -79,6 +79,10 @@ namespace App\Services;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use App\Services\WordPressConfigService;
+use App\Support\ChatErrorMessages;
+use App\Support\SqlReadOnlyValidator;
+use App\Support\SqlTextSearchBroadener;
+use App\Support\SearchSynonyms;
 
 class SQLGeneratorService
 {
@@ -93,17 +97,25 @@ class SQLGeneratorService
      * ✅ Generate SQL query using OpenAI NLP
      * Sends FULL user input + FULL database schema to OpenAI
      * OpenAI uses NLP to understand the query and generate appropriate SQL
-     * 
-     * @param string $userQuery The natural language query from user
-     * @param array $schema Complete database schema (all tables, all columns)
-     * @param string|null $openaiKey Optional OpenAI API key (if not provided, uses config service)
-     * @return array Contains 'query' (SQL) or 'error'
+     *
+     * @param string      $userQuery            Natural language query from user
+     * @param array       $schema               Effective schema (already filtered by spec when active)
+     * @param string|null $openaiKey            Optional OpenAI API key
+     * @param array|null  $specificationContext When set, enables strict specification mode.
+     *                                          Keys: chunks (string[]), rules_summary (string),
+     *                                                allowlist (array), allowed_table_names (string[])
+     * @param array|null  $conversationHistory  Prior turns [{role, content}] for follow-up questions.
+     * @return array  Contains 'query' (SQL), 'refusal' (string), or 'error' (string).
      */
-    public function queryChatGPTForSQL($userQuery, $schema, $openaiKey = null)
+    public function queryChatGPTForSQL($userQuery, $schema, $openaiKey = null, ?array $specificationContext = null, ?array $conversationHistory = null)
     {
         Log::info("🔍 Starting NLP SQL Generation");
         Log::info("📝 User Query: " . $userQuery);
+        if (!empty($conversationHistory)) {
+            Log::info("💬 Conversation history turns: " . count($conversationHistory));
+        }
         Log::info("📊 Schema: " . count($schema) . " tables");
+        Log::info("📋 Specification mode: " . ($specificationContext !== null ? 'active' : 'off'));
         
         // Get WordPress Multisite information (for logging only, not for constructing table names)
         $wpInfo = $this->configService->getWordPressInfo();
@@ -121,8 +133,14 @@ class SQLGeneratorService
         $tableList = [];
         
         foreach ($schema as $table => $columns) {
-            // Compact format: table(column1,column2,...)
-            $schemaStr .= "$table(" . implode(',', $columns) . ")\n";
+            if (!\is_array($columns)) {
+                continue;
+            }
+            $flatCols = $this->flattenSchemaColumnsForSql($columns);
+            if ($flatCols === []) {
+                continue;
+            }
+            $schemaStr .= $table . '(' . implode(',', $flatCols) . ")\n";
             $tableList[] = $table;
         }
         
@@ -141,6 +159,12 @@ class SQLGeneratorService
                   "- You MUST use ONLY the tables and columns that EXIST in the schema\n" .
                   "- You MUST understand what the user is asking for (show data vs count data)\n" .
                   "- ⚠️⚠️⚠️ CRITICAL: You MUST include WHERE clause with date filter if user mentions ANY time period (last year, this month, yesterday, etc.)\n\n" .
+                  "SECURITY & PRIVACY RULES (MINIMAL — ANSWER ALMOST EVERYTHING):\n" .
+                  "- You ARE allowed to answer ANY question about the store's data: orders, products, customers, names, emails, phone numbers, billing/shipping addresses, order notes, settings/options, users and their roles, etc. None of these are blocked — DO NOT refuse them.\n" .
+                  "- The ONLY values you must NEVER return are: passwords and API keys / secrets / auth tokens. Concretely, never SELECT these columns or serialized meta values: user_pass, password, pwd, passwd, secret, consumer_secret, consumer_key, api_key, access_token, refresh_token, secret_key, and any column matching *_secret, *_token, or *_api_key.\n" .
+                  "- If a table contains a forbidden column (e.g. users.user_pass, woocommerce_api_keys.consumer_secret), simply OMIT that one column and SELECT the other useful columns instead — do NOT refuse the whole query.\n" .
+                  "- You may freely query any table in the schema (including users, usermeta, options) for non-credential information.\n" .
+                  "- Only refuse outright if the user EXPLICITLY asks for a password or an API key/secret token AND there is no other useful data to return.\n\n" .
                   "IMPORTANT WORDPRESS + WOOCOMMERCE CONTEXT:\n" .
                   ($isMultisite ? 
                   "- ⚠️ THIS IS A WORDPRESS MULTISITE/NETWORK INSTALLATION\n" .
@@ -153,27 +177,31 @@ class SQLGeneratorService
                   "- You MUST use ONLY the EXACT table names from the schema - do NOT modify, construct, or invent table names\n" .
                   "- Example table names in schema: " . $tableNamesList . "\n" .
                   "- Use the EXACT table name as it appears in the schema - even if it looks unusual\n" .
+                  "- CUSTOM / NON-WOOCOMMERCE TABLES: The schema may include custom plugin tables (not WordPress core).\n" .
+                  "  * When the user names a table (e.g. \"test table\"), find the schema table that matches (spaces vs underscores do not matter for matching).\n" .
+                  "  * Use that table's EXACT name from the schema in FROM/JOIN — never invent wp_posts or wc_orders if the user asked about a custom table.\n" .
+                  "  * For \"get record from X table\", SELECT from the matching custom table with appropriate WHERE/LIMIT.\n" .
                   "- For posts: Look for tables containing 'posts' in the schema\n" .
                   "- For orders: Look for tables containing 'order' or 'wc_orders' in the schema\n" .
                   "- ⚠️⚠️⚠️ CRITICAL ORDER QUERY RULES:\n" .
                   "  * When user asks for 'orders list', 'list orders', 'show orders', 'get orders', 'share orders', 'orders', 'all orders':\n" .
-                  "    → Use SELECT * FROM order_table (or SELECT specific columns like order_id, order_date, status, total)\n" .
+                  "    → Use SELECT id, status, date_created, total_amount FROM order_table (select only meaningful columns, NEVER SELECT *)\n" .
                   "    → Use ORDER BY date_column DESC to show most recent first\n" .
                   "    → Use LIMIT 50 or LIMIT 100 to avoid returning too many rows\n" .
-                  "    → Example: 'orders list' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 50\n" .
+                  "    → Example: 'orders list' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 50\n" .
                   "  * 🚨🚨🚨 CRITICAL: When user asks for 'last 3 orders', 'last 5 orders', 'recent orders', 'latest orders', 'last N orders', 'share last 3 orders':\n" .
-                  "    → YOU MUST generate: SELECT * FROM order_table ORDER BY date_column DESC LIMIT N\n" .
+                  "    → YOU MUST generate: SELECT id, status, date_created, total_amount FROM order_table ORDER BY date_column DESC LIMIT N\n" .
                   "    → DO NOT add WHERE clauses unless user explicitly mentions dates/status\n" .
                   "    → DO NOT use COUNT(*) - user wants to SEE the orders, not count them\n" .
                   "    → DO NOT filter by status unless user explicitly asks for specific status\n" .
-                  "    → Example: 'last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    → Example: 'share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    → Example: 'can you share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    → Example: 'last 5 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 5\n" .
+                  "    → Example: 'last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    → Example: 'share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    → Example: 'can you share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    → Example: 'last 5 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 5\n" .
                   "  * ⚠️ CRITICAL: DO NOT use COUNT(*) for these queries - user wants to SEE the orders, not count them\n" .
-                  "  * ⚠️ CRITICAL: 'orders list' means SELECT * FROM orders, NOT SELECT COUNT(*) FROM orders\n" .
-                  "  * ⚠️ CRITICAL: 'last 3 orders' means SELECT * FROM orders ORDER BY date DESC LIMIT 3, NOT SELECT COUNT(*) FROM orders\n" .
-                  "  * ⚠️ CRITICAL: 'share last 3 orders' means SELECT * FROM orders ORDER BY date DESC LIMIT 3, NOT SELECT COUNT(*) FROM orders\n" .
+                  "  * ⚠️ CRITICAL: 'orders list' means SELECT key columns FROM orders, NOT SELECT COUNT(*) or SELECT * FROM orders\n" .
+                  "  * ⚠️ CRITICAL: 'last 3 orders' means SELECT key columns FROM orders ORDER BY date DESC LIMIT 3, NOT SELECT COUNT(*) or SELECT *\n" .
+                  "  * ⚠️ CRITICAL: 'share last 3 orders' means SELECT key columns FROM orders ORDER BY date DESC LIMIT 3, NOT SELECT COUNT(*) or SELECT *\n" .
                   "  * ⚠️ CRITICAL: Check the schema CAREFULLY for the EXACT order table name:\n" .
                   "    - Look for tables containing 'order' in the schema (might be wc_orders, wc_order_stats, wp_posts with post_type='shop_order')\n" .
                   "    - For WooCommerce HPOS: Use wc_orders table (check schema for exact name like wp53_5_wc_orders)\n" .
@@ -260,18 +288,18 @@ class SQLGeneratorService
                   "   - 'show all users' = SELECT all users from users table (NOT searching for specific username)\n" .
                   "   - 'show all users with roles' = SELECT users JOIN usermeta to get roles (NOT searching for username 'roles')\n" .
                   "   - 'list users' = SELECT from users table (NOT searching for a user)\n" .
-                  "   - 'show all orders' = SELECT * or SELECT specific columns (NOT COUNT)\n" .
+                  "   - 'show all orders' = SELECT key columns like id, status, date_created, total (NOT COUNT, NOT SELECT *)\n" .
                   "   - 'how many orders' = SELECT COUNT(*) (COUNT query)\n" .
                   "   - 🚨🚨🚨 CRITICAL 'LAST N ORDERS' QUERIES:\n" .
                   "     * When user says 'last 3 orders', 'last 5 orders', 'share last 3 orders', 'can you share last 3 orders':\n" .
                   "       → Extract the number N from the query (3, 5, etc.)\n" .
-                  "       → Generate: SELECT * FROM order_table ORDER BY date_column DESC LIMIT N\n" .
+                  "       → Generate: SELECT id, status, date_created, total_amount FROM order_table ORDER BY date_column DESC LIMIT N\n" .
                   "       → DO NOT add WHERE clauses - user wants the LAST N orders, period\n" .
                   "       → DO NOT filter by status - user wants ALL orders, just the last N\n" .
                   "       → DO NOT use COUNT(*) - user wants to SEE the orders\n" .
-                  "       → Example: 'last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "       → Example: 'share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "       → Example: 'can you share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "       → Example: 'last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "       → Example: 'share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "       → Example: 'can you share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
                   "       → Use the EXACT table name from schema (might be wp53_5_wc_orders, wp_posts, etc.)\n" .
                   "       → Use the EXACT date column from schema (might be date_created, date_created_gmt, post_date, etc.)\n" .
                   "   - CRITICAL: When user says 'with roles', 'with that user roles', 'with user roles' - they mean 'INCLUDE roles in the result', NOT 'search for username roles'\n" .
@@ -315,6 +343,7 @@ class SQLGeneratorService
                   "- When user asks for 'processing status', use: WHERE LOWER(column_name) = LOWER('processing') OR column_name LIKE '%processing%'\n" .
                   "- Replace 'column_name' with the EXACT status column name from the schema\n" .
                   "\n" .
+                  SearchSynonyms::promptBlock() .
                   "CRITICAL WOOCOMMERCE ORDER TABLES & DATE COLUMNS:\n" .
                   "- WooCommerce stores orders in multiple tables: wc_order_stats, wc_orders, wc_order_product_lookup, posts (legacy)\n" .
                   "- 🚨🚨🚨 CRITICAL COLUMN DIFFERENCES BETWEEN ORDER TABLES:\n" .
@@ -333,26 +362,31 @@ class SQLGeneratorService
                   "- When filtering by date, use >= and < for accuracy: [date_column] >= '2024-12-01' AND [date_column] < '2025-01-01'\n" .
                   "\n" .
                   "QUERY TYPE RULES:\n" .
-                  "- If user asks to 'show', 'list', 'display', 'get', 'share' orders/posts/products: Use SELECT * or SELECT specific_columns (NOT COUNT)\n" .
+                  "- ⚠️⚠️⚠️ CRITICAL COLUMN SELECTION: NEVER use SELECT * for listing queries. Always select ONLY the columns that are meaningful to the user.\n" .
+                  "  * For POSTS/PRODUCTS from wp_posts: SELECT only post_title, post_excerpt, post_status, post_date (and ID if needed). NEVER include post_author, post_date_gmt, post_content (if too long), post_password, post_name, to_ping, pinged, post_modified, post_modified_gmt, post_content_filtered, post_parent, guid, menu_order, post_type, post_mime_type, comment_count, comment_status, ping_status.\n" .
+                  "  * For ORDERS from wc_orders: SELECT only id/order_id, status, date_created, total_amount, customer_id. NEVER include internal columns like ip_address, transaction_id, customer_ip_address, cart_hash, etc.\n" .
+                  "  * For ORDERS from wc_order_stats: SELECT only order_id, status, date_created, total_sales, num_items_sold. Omit internal tracking columns.\n" .
+                  "  * GENERAL RULE: If the user asks 'what products are available?' or 'show me products', return product name (post_title), description (post_excerpt), price (if joinable), and status — NOT every database column.\n" .
+                  "- If user asks to 'show', 'list', 'display', 'get', 'share' orders/posts/products: Use SELECT specific_columns (NOT COUNT, NOT SELECT *)\n" .
                   "- 🚨🚨🚨 CRITICAL: 'last N orders' queries (where N is a number like 3, 5, 10):\n" .
                   "  * Pattern: 'last 3 orders', 'last 5 orders', 'share last 3 orders', 'can you share last 3 orders'\n" .
-                  "  * SQL Pattern: SELECT * FROM order_table ORDER BY date_column DESC LIMIT N\n" .
+                  "  * SQL Pattern: SELECT id, status, date_created, total_amount FROM order_table ORDER BY date_column DESC LIMIT N\n" .
                   "  * Extract N from query: 'last 3 orders' → LIMIT 3, 'last 5 orders' → LIMIT 5\n" .
                   "  * DO NOT add WHERE clauses - user wants the LAST N orders regardless of status or date range\n" .
                   "  * DO NOT use COUNT(*) - user wants to SEE the orders, not count them\n" .
                   "  * Examples:\n" .
-                  "    - 'last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    - 'share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    - 'can you share last 3 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
-                  "    - 'last 5 orders' → SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 5\n" .
-                  "- Examples: 'show orders', 'list orders', 'get orders', 'share orders', 'orders list' → SELECT * FROM order_table ORDER BY date_column DESC LIMIT 50\n" .
+                  "    - 'last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    - 'share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    - 'can you share last 3 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 3\n" .
+                  "    - 'last 5 orders' → SELECT id, status, date_created, total_amount FROM wc_orders ORDER BY date_created DESC LIMIT 5\n" .
+                  "- Examples: 'show orders', 'list orders', 'get orders', 'share orders', 'orders list' → SELECT id, status, date_created, total_amount FROM order_table ORDER BY date_column DESC LIMIT 50\n" .
                   "- If user asks 'how many', 'count', 'number of': Use SELECT COUNT(*) AS count_name\n" .
-                  "- If user asks for 'all orders with processing status': SELECT * FROM table WHERE status condition (NOT COUNT)\n" .
+                  "- If user asks for 'all orders with processing status': SELECT id, status, date_created, total_amount FROM table WHERE status condition (NOT COUNT)\n" .
                   "- If user asks for 'count of orders with processing status': SELECT COUNT(*) AS order_count FROM table WHERE status condition\n" .
                   "- If user asks for 'total sales', 'revenue', 'total amount': Use SELECT SUM(total_sales) from wc_order_stats OR SELECT SUM(total_amount) from wc_orders (check schema for correct column!)\n" .
                   "- If user asks for 'average price', 'average order value': Use SELECT AVG(column_name) AS average_value\n" .
-                  "- ⚠️ CRITICAL: 'orders list', 'list orders', 'show orders', 'get orders', 'share orders' means SELECT * FROM orders table (NOT COUNT)\n" .
-                  "- ⚠️ CRITICAL: 'last 3 orders', 'recent orders', 'latest orders' means SELECT * FROM orders ORDER BY date DESC LIMIT 3\n" .
+                  "- ⚠️ CRITICAL: 'orders list', 'list orders', 'show orders', 'get orders', 'share orders' means SELECT key columns FROM orders table (NOT COUNT, NOT SELECT *)\n" .
+                  "- ⚠️ CRITICAL: 'last 3 orders', 'recent orders', 'latest orders' means SELECT key columns FROM orders ORDER BY date DESC LIMIT 3\n" .
                   "\n" .
                   "AGGREGATE FUNCTION RULES (CRITICAL FOR ACCURACY):\n" .
                   "- COUNT(*): Count all rows (use for 'how many orders', 'number of products')\n" .
@@ -396,6 +430,27 @@ class SQLGeneratorService
                   "- ⚠️⚠️⚠️ CRITICAL: When using GROUP BY product_id, you MUST also include post_title in SELECT and GROUP BY\n" .
                   "- Example with GROUP BY: SELECT ol.product_id, p.post_title AS product_name, SUM(ol.quantity) AS total_sold FROM wc_order_product_lookup ol JOIN wp_posts p ON p.ID = ol.product_id WHERE p.post_type = 'product' GROUP BY ol.product_id, p.post_title ORDER BY total_sold DESC\n" .
                   "- NEVER return only product_id without product_name - users need to see actual product names\n\n" .
+                  SqlTextSearchBroadener::promptRulesBlock() .
+                  "PRODUCT CATALOG RULES (CRITICAL):\n" .
+                  "- WooCommerce products live in the posts table (post_type='product'). That is the source of truth for catalog questions.\n" .
+                  "- NEVER answer \"what products do we have\" using only wc_product_meta_lookup — it may be empty while products exist in posts.\n" .
+                  "- List/search products: SELECT from posts WHERE post_type='product' AND post_status NOT IN ('trash','auto-draft').\n" .
+                  "- Do not require post_status='publish' only unless the user asks for published products specifically.\n\n" .
+                  "WOOCOMMERCE STOCK / INVENTORY RULES (CRITICAL — STOCK IS NOT A POSTS COLUMN):\n" .
+                  "- 🚨 The posts table has NO 'stock_status' or 'stock_quantity' column. NEVER write posts.stock_status — that causes an 'Unknown column' error.\n" .
+                  "- Stock information lives in OTHER tables. Check the schema and use whichever exists:\n" .
+                  "  * PREFERRED: the product meta lookup table (name contains 'wc_product_meta_lookup'). Columns: product_id, stock_status, stock_quantity. JOIN it to posts on product_id = posts.ID.\n" .
+                  "  * FALLBACK: the postmeta table (name contains 'postmeta'). Stock status is meta_key='_stock_status' (meta_value 'instock'/'outofstock'/'onbackorder'); quantity is meta_key='_stock'. JOIN postmeta to posts on post_id = posts.ID.\n" .
+                  "- Stock status values are stored WITHOUT spaces: 'instock', 'outofstock', 'onbackorder'. Match them with case-insensitive LIKE on the CORE word:\n" .
+                  "  * 'in stock', 'in-stock', 'available', 'instock' → stock_status LIKE '%instock%'\n" .
+                  "  * 'out of stock', 'sold out', 'unavailable' → stock_status LIKE '%outofstock%'\n" .
+                  "  * 'on backorder', 'backorder' → stock_status LIKE '%backorder%'\n" .
+                  "- NEVER filter stock with the user's spaced phrase (stock_status = 'in stock' is WRONG — the stored value is 'instock').\n" .
+                  "- Example ('list the products that are in stock') when wc_product_meta_lookup exists:\n" .
+                  "  SELECT p.ID, p.post_title, l.stock_status, l.stock_quantity FROM wp_posts p JOIN wp_wc_product_meta_lookup l ON l.product_id = p.ID WHERE p.post_type='product' AND p.post_status NOT IN ('trash','auto-draft') AND l.stock_status LIKE '%instock%' ORDER BY p.post_title ASC LIMIT 50\n" .
+                  "- Example via postmeta fallback:\n" .
+                  "  SELECT p.ID, p.post_title, pm.meta_value AS stock_status FROM wp_posts p JOIN wp_postmeta pm ON pm.post_id = p.ID AND pm.meta_key='_stock_status' WHERE p.post_type='product' AND p.post_status NOT IN ('trash','auto-draft') AND pm.meta_value LIKE '%instock%' ORDER BY p.post_title ASC LIMIT 50\n" .
+                  "- Use the EXACT table names from the schema (they may have a prefix like wp53_5_). If neither stock table is in the schema, list the products without the stock filter rather than refusing.\n\n" .
                   "CRITICAL RULES:\n" .
                   "- Generate ONLY ONE SQL query - never multiple queries separated by semicolons\n" .
                   "- If user asks for multiple counts (e.g., products AND variations), use subqueries or UNION ALL in a single query\n" .
@@ -407,7 +462,12 @@ class SQLGeneratorService
                   "- 🚨🚨🚨 NEVER use 'oi.product_qty' or 'order_items.product_qty' - this will cause 'Unknown column' database error!\n" .
                   "- ✅ If using order_items table, quantity MUST come from wp_woocommerce_order_itemmeta WHERE meta_key='_qty'\n\n" .
                   "User request: \"$userQuery\"\n\n" .
-                  "Database schema (" . count($tableList) . " tables):\n$schemaStr\n\n" .
+                  "SCHEMA SCOPE (OVERRIDES ANY GENERIC WOOCOMMERCE / WORDPRESS TABLE HINTS ABOVE):\n" .
+                  "- Only tables listed under \"Database schema\" below may appear in FROM or JOIN.\n" .
+                  "- If the question cannot be answered using only those tables and their columns, respond with exactly one line:\n" .
+                  "  SPEC_REFUSAL: This question is outside the tables defined in the merchant schema.\n" .
+                  "- If users, usermeta, or other core tables are not listed in the schema, do not reference them — use SPEC_REFUSAL instead.\n\n" .
+                  'Database schema (' . count($tableList) . " tables):\n$schemaStr\n\n" .
                   "⚠️⚠️⚠️ CRITICAL: TABLE AND COLUMN NAMES IN SCHEMA ARE EXACT - USE THEM EXACTLY ⚠️⚠️⚠️\n" .
                   "The schema above shows the EXACT table names and column names that exist in the database.\n" .
                   "You MUST copy the table names EXACTLY as they appear in the schema.\n" .
@@ -455,53 +515,29 @@ class SQLGeneratorService
                   "   - ⚠️⚠️⚠️ DATE column might be 'date_created', 'date_created_gmt', 'order_date', 'post_date' - check the schema\n" .
                   "   - Use ONLY column names that exist in the schema - NEVER assume column names\n" .
                   "4. Determine if user wants to SHOW data or COUNT data\n" .
-                  "5. Generate a SINGLE, CORRECT MySQL SELECT query:\n" .
+                  "5. ⚠️ CRITICAL: Select ONLY meaningful, user-facing columns. NEVER use SELECT *. Only include columns that provide value to the end user (e.g., name/title, status, date, price/total, description/excerpt). Exclude internal columns like post_author, post_date_gmt, ping_status, comment_status, post_password, to_ping, pinged, post_content_filtered, post_parent, guid, menu_order, post_mime_type, comment_count, post_name, post_modified_gmt, etc.\n" .
+                  "6. Generate a SINGLE, CORRECT MySQL SELECT query:\n" .
                   "   - Use the EXACT table name from the schema (copy it exactly as it appears)\n" .
                   "   - Use the EXACT column names from the schema\n" .
                   "   - For status filtering, use case-insensitive matching: LOWER(column_name) = LOWER('processing') OR column_name LIKE '%processing%'\n" .
                   "   - CRITICAL: Use the table name EXACTLY as it appears in the schema - do NOT modify it\n" .
                   "\n" .
-                  "🚨 CRITICAL SECURITY RULES - DATA ANALYTICS ONLY:\n" .
-                  "This is a DATA ANALYTICS tool, NOT a data extraction tool. You MUST protect user privacy:\n" .
-                  "✅✅✅ CRITICAL: Product sales data, order analytics, revenue statistics, best selling products, order counts, and business metrics are NOT sensitive personal information. These are legitimate analytics queries and you MUST generate SQL for them.\n" .
-                  "✅ ALLOWED QUERIES (MUST generate SQL):\n" .
-                  "   - 'best selling products', 'most selling product', 'top products' → Generate SQL with SUM/COUNT and GROUP BY\n" .
-                  "   - 'order statistics', 'sales data', 'revenue reports' → Generate SQL with SUM/COUNT/AVG\n" .
-                  "   - 'product performance', 'order counts', 'sales trends' → Generate SQL for analytics\n" .
-                  "   - 'last N orders', 'recent orders', 'order list' → Generate SQL to show orders\n" .
-                  "   - All product, order, and sales analytics queries → MUST generate SQL\n" .
-                  "❌ BLOCKED QUERIES (DO NOT generate SQL):\n" .
-                  "   - 'user passwords', 'customer passwords', 'get password' → Refuse (sensitive)\n" .
-                  "   - 'user emails', 'customer emails', 'show emails' → Refuse (sensitive personal data)\n" .
-                  "   - 'user addresses', 'customer addresses' → Refuse (sensitive personal data)\n" .
-                  "   - 'credit card numbers', 'payment details' → Refuse (sensitive financial data)\n" .
-                  "1. ❌ NEVER select or return sensitive columns:\n" .
-                  "   - Passwords (user_pass, password, pwd, passwd, etc.)\n" .
-                  "   - Email addresses (user_email, email, mail) - unless for analytics counts\n" .
-                  "   - Personal information (phone, address, ssn, credit_card, ip_address)\n" .
-                  "   - Authentication data (token, api_key, session_token, activation_key, reset_key)\n" .
-                  "   - Usernames (user_login, login, username) - unless for analytics counts\n" .
-                  "2. ✅ ALLOWED: Product sales, order analytics, revenue data (NOT sensitive):\n" .
-                  "   - Product sales: SELECT product_id, SUM(quantity) AS total_sold FROM wc_order_product_lookup GROUP BY product_id (OK)\n" .
-                  "   - Order statistics: SELECT * FROM wc_orders ORDER BY date_created DESC LIMIT 10 (OK)\n" .
-                  "   - Revenue data: SELECT SUM(total_sales) AS revenue FROM wc_order_stats (OK)\n" .
-                  "   - Best selling products: SELECT product_id, SUM(quantity) AS total_sold FROM wc_order_product_lookup GROUP BY product_id ORDER BY total_sold DESC LIMIT 10 (OK)\n" .
-                  "   - Counts: SELECT COUNT(*) AS total_users (OK)\n" .
-                  "   - Sums: SELECT SUM(total_sales) AS revenue (OK)\n" .
-                  "   - Averages: SELECT AVG(order_value) AS avg_value (OK)\n" .
-                  "   - Statistics: SELECT status, COUNT(*) AS count GROUP BY status (OK)\n" .
-                  "3. ❌ NEVER use SELECT * on user-related tables (users, usermeta, customers) - but orders/products are OK\n" .
-                  "   - Bad: SELECT * FROM wp_users (sensitive personal data)\n" .
-                  "   - Good: SELECT COUNT(*) AS user_count FROM wp_users (analytics only)\n" .
-                  "   - Good: SELECT * FROM wc_orders (orders are NOT sensitive - business data)\n" .
-                  "   - Good: SELECT * FROM wp_posts WHERE post_type='product' (products are NOT sensitive)\n" .
-                  "4. ❌ NEVER return individual user records with personal data\n" .
-                  "   - Bad: SELECT user_login, user_email FROM wp_users (sensitive)\n" .
-                  "   - Good: SELECT COUNT(*) AS total_users FROM wp_users WHERE user_role = 'customer' (analytics)\n" .
-                  "   - Good: SELECT order_id, order_date, total FROM wc_orders (orders are business data, NOT sensitive)\n" .
-                  "5. If query asks for sensitive data (passwords, emails, personal info): Refuse - DO NOT GENERATE SQL\n" .
-                  "6. If query asks for product sales, orders, or business analytics: MUST GENERATE SQL - these are NOT sensitive\n" .
-                  "7. Focus on ANALYTICS and INSIGHTS, not raw personal data extraction\n" .
+                  "DATA ACCESS RULES (BE HELPFUL — ANSWER ALMOST EVERYTHING):\n" .
+                  "Your job is to ANSWER the user's question by generating SQL. Do NOT refuse questions about normal store data.\n" .
+                  "✅ ALWAYS GENERATE SQL for questions like:\n" .
+                  "   - Orders, order lists, order details, order status (any status) → generate SQL\n" .
+                  "   - Products, best selling / top products, sales, revenue, analytics, counts → generate SQL\n" .
+                  "   - Customers and their details: names, emails, phone numbers, billing/shipping addresses → generate SQL (these are allowed)\n" .
+                  "   - Users and their roles, options/settings, posts, pages, comments, custom plugin tables → generate SQL\n" .
+                  "❌ THE ONLY THINGS YOU MUST NEVER RETURN are passwords and API keys / secrets / auth tokens:\n" .
+                  "   - Password columns: user_pass, password, pwd, passwd\n" .
+                  "   - API key / secret / token columns: api_key, consumer_key, consumer_secret, secret, secret_key, access_token, refresh_token, and any column matching *_secret, *_token, or *_api_key\n" .
+                  "1. Handling forbidden columns: do NOT refuse the whole question. Just OMIT the forbidden column and SELECT the remaining useful columns.\n" .
+                  "   - Example: 'show users' → SELECT ID, user_login, user_email, display_name, user_registered FROM users (OMIT user_pass) — do NOT refuse.\n" .
+                  "   - Example: 'customer emails and phone' → SELECT display_name, user_email, billing_phone ... — this is ALLOWED.\n" .
+                  "2. ✅ All of these are allowed and MUST generate SQL: customer emails, phone numbers, addresses, order totals, payment status, product data, user roles, options.\n" .
+                  "3. SELECT only the meaningful columns (avoid SELECT * and avoid dumping huge serialized meta), but DO return the columns the user asked for as long as they are not passwords or API keys/secrets.\n" .
+                  "4. Only refuse outright when the user EXPLICITLY asks for a password or an API key/secret/token and there is no other useful data to return. In that case respond with a short, polite sentence (no SQL) explaining you can share anything except passwords and API keys.\n" .
                   "\n" .
                   "   - For DATE/TIME filtering, ALWAYS use date ranges (>= and <) for maximum accuracy:\n" .
                   "     * CRITICAL: Use date ranges, NOT YEAR()/MONTH() functions - date ranges work with all date formats and timezones\n" .
@@ -521,9 +557,25 @@ class SQLGeneratorService
                   "7. Return ONLY ONE SQL query - no multiple queries, no semicolons, no explanations, no markdown, no code blocks\n\n" .
                   "SQL:";
 
+        // ------------------------------------------------------------------
+        // SPECIFICATION MODE: prepend strict constraints when active.
+        // The specification context is injected after the base prompt so
+        // the model sees it as the highest-priority instruction block.
+        // ------------------------------------------------------------------
+        if ($specificationContext !== null) {
+            $specBlock = $this->buildSpecificationPromptBlock($specificationContext, $userQuery);
+            // Replace trailing "SQL:" with the spec block + "SQL:"
+            $prompt = rtrim(substr($prompt, 0, -4)) . "\n\n" . $specBlock . "\n\nSQL:";
+        }
+
+        $historyBlock = $this->buildConversationHistoryBlock($conversationHistory ?? [], $userQuery);
+        if ($historyBlock !== '') {
+            $prompt = rtrim(substr($prompt, 0, -4)) . "\n\n" . $historyBlock . "\n\nSQL:";
+        }
+
         try {
-            // Use provided OpenAI key (from Site model) or fallback to config service
-            $apiKey = $openaiKey ?? $this->configService->getOpenAIApiKey();
+            // Use provided OpenAI key only (from plugin header or site DB — never .env)
+            $apiKey = $openaiKey;
             
             if (empty($apiKey)) {
                 Log::error("OpenAI API Key is missing!");
@@ -563,7 +615,7 @@ class SQLGeneratorService
             ])->timeout(30)->post('https://api.openai.com/v1/chat/completions', [
                 'model' => $model,
                 'messages' => [
-                    ['role' => 'system', 'content' => '🚨 CRITICAL SECURITY: You are a DATA ANALYTICS assistant for WordPress/WooCommerce. You MUST protect user privacy by NEVER generating SQL that retrieves PASSWORDS, EMAIL ADDRESSES, PHONE NUMBERS, ADDRESSES, or CREDIT CARD INFORMATION. ✅✅✅ IMPORTANT: Product sales data, order analytics, revenue statistics, best selling products, order counts, and business metrics are NOT sensitive and MUST be generated. These are legitimate analytics queries. ✅ ALLOWED: "best selling products", "most selling product", "top products", "order statistics", "sales data", "revenue reports", "product performance" - ALL of these are analytics and MUST generate SQL. ❌ BLOCKED: "user passwords", "customer emails", "user addresses", "credit card numbers" - these are sensitive personal information. You are an EXPERT WordPress developer and SQL developer. Your role is to analyze database schemas and generate CORRECT MySQL SELECT queries. CRITICAL INSTRUCTIONS: 1) You MUST carefully analyze the provided schema to find EXACT table and column names - do NOT assume or invent names. 2) You MUST understand what the user wants: "show/list/display/get/share" means SELECT data (NOT COUNT), "how many/count" means SELECT COUNT(*). 3) You MUST use ONLY the tables and columns that exist in the schema. 4) For status fields, ALWAYS use case-insensitive matching (LOWER(column_name) = LOWER(\'value\') or column_name LIKE \'%value%\') and use the EXACT column name from the schema. 5) For DATE/TIME filtering: CRITICAL - ALWAYS use date ranges (date_column >= \'YYYY-MM-DD\' AND date_column < \'YYYY-MM-DD\') NOT YEAR() and MONTH() functions. Date ranges work correctly with all date formats and timezones. "last December" means December of previous year (e.g., in Jan 2026, use >= \'2025-12-01\' AND < \'2026-01-01\'). Use >= for start, < (not <=) for end. ⚠️⚠️⚠️ IF USER MENTIONS ANY TIME PERIOD (last year, this month, yesterday, last week, etc.), YOU MUST INCLUDE WHERE clause with date filter - NEVER ignore time constraints! 6) Generate ONLY ONE SQL query - never multiple queries. 7) Use EXACT table and column names from the schema - COPY them EXACTLY as they appear, do NOT modify, abbreviate, or construct them. 8) DO NOT use generic table names like "wp_wc_order_product_lookup" - you MUST use the EXACT table name from the schema (e.g., "wp53_5_wc_order_product_lookup"). 9) The schema contains ONLY the tables for the current site - use those EXACT table names. Return ONLY ONE SQL query - no semicolons, no explanations, no markdown, no code blocks.'],
+                    ['role' => 'system', 'content' => 'You are a helpful DATA assistant for WordPress/WooCommerce. Answer the user\'s question by generating a MySQL SELECT query. Be permissive: generate SQL for almost ANY question about store data — orders, products, sales, analytics, customers, emails, phone numbers, billing/shipping addresses, users, roles, options, posts, comments, custom tables. ✅ ALLOWED (generate SQL): "list the orders", "best selling products", "customer emails", "customer phone numbers", "customer addresses", "users and roles", "order statistics", any status query. ❌ THE ONLY data you must NEVER return is passwords and API keys/secrets/tokens (columns like user_pass, password, api_key, consumer_secret, *_token). When a table has such a column, OMIT just that column and still return the other useful columns — do NOT refuse the whole question. Treat similar-meaning words as the same filter (e.g. "payment pending"/"pending payment" → status LIKE \'%pending%\') and use partial, case-insensitive LIKE so close wording still returns rows. Only refuse (with one short sentence, no SQL) if the user explicitly asks for a password or API key/secret. You are an EXPERT WordPress developer and SQL developer. Your role is to analyze database schemas and generate CORRECT MySQL SELECT queries. CRITICAL INSTRUCTIONS: 1) You MUST carefully analyze the provided schema to find EXACT table and column names - do NOT assume or invent names. 2) You MUST understand what the user wants: "show/list/display/get/share" means SELECT data (NOT COUNT), "how many/count" means SELECT COUNT(*). 3) You MUST use ONLY the tables and columns that exist in the schema. 4) For status fields, ALWAYS use case-insensitive matching (LOWER(column_name) = LOWER(\'value\') or column_name LIKE \'%value%\') and use the EXACT column name from the schema. 5) For DATE/TIME filtering: CRITICAL - ALWAYS use date ranges (date_column >= \'YYYY-MM-DD\' AND date_column < \'YYYY-MM-DD\') NOT YEAR() and MONTH() functions. Date ranges work correctly with all date formats and timezones. "last December" means December of previous year (e.g., in Jan 2026, use >= \'2025-12-01\' AND < \'2026-01-01\'). Use >= for start, < (not <=) for end. ⚠️⚠️⚠️ IF USER MENTIONS ANY TIME PERIOD (last year, this month, yesterday, last week, etc.), YOU MUST INCLUDE WHERE clause with date filter - NEVER ignore time constraints! 6) Generate ONLY ONE SQL query - never multiple queries. 7) Use EXACT table and column names from the schema - COPY them EXACTLY as they appear, do NOT modify, abbreviate, or construct them. 8) DO NOT use generic table names like "wp_wc_order_product_lookup" - you MUST use the EXACT table name from the schema (e.g., "wp53_5_wc_order_product_lookup"). 9) The schema contains ONLY the tables for the current site - use those EXACT table names. Return ONLY ONE SQL query - no semicolons, no explanations, no markdown, no code blocks.'],
                     ['role' => 'user', 'content' => $prompt],
                 ],
                 'max_tokens' => $maxTokens,
@@ -630,7 +682,14 @@ class SQLGeneratorService
 
             // Extract the SQL query
             $sqlQuery = trim($openAIResponse['choices'][0]['message']['content']);
-            
+
+            // Handle specification-mode out-of-scope refusal (SPEC_REFUSAL: <reason>)
+            if (preg_match('/^SPEC_REFUSAL:\s*(.+)/si', $sqlQuery, $refusalMatch)) {
+                $reason = trim($refusalMatch[1]);
+                Log::info("📋 Specification refusal: " . substr($reason, 0, 150));
+                return ['refusal' => $reason];
+            }
+
             // ✅ Check if OpenAI refused to generate SQL or returned an error message
             // But DON'T return error yet - try extraction first in case SQL is mixed with refusal text
             $sqlQueryLower = strtolower($sqlQuery);
@@ -986,17 +1045,154 @@ class SQLGeneratorService
                 }
             }
             
+            $sqlQuery = SqlTextSearchBroadener::broaden($sqlQuery, $userQuery);
+            $sqlQuery = SqlTextSearchBroadener::broadenStatusFilters($sqlQuery, $userQuery);
+            Log::info('🔍 SQL after text-search broadening: ' . substr($sqlQuery, 0, 500));
+
+            $validation = SqlReadOnlyValidator::validate($sqlQuery);
+            if (!$validation['valid']) {
+                Log::error('Generated SQL failed read-only validation: ' . ($validation['error'] ?? 'unknown'));
+                return ['error' => ChatErrorMessages::fromSqlValidation($validation)];
+            }
+
             return ['query' => $sqlQuery];
 
         } catch (\Illuminate\Http\Client\ConnectionException $e) {
             Log::error("OpenAI API Connection Error: " . $e->getMessage());
-            return ['error' => 'Failed to connect to OpenAI API. Please check your internet connection.'];
+            return ['error' => ChatErrorMessages::openAiConnection()];
         } catch (\Exception $e) {
             Log::error("OpenAI API Error: " . $e->getMessage());
             Log::error("Stack trace: " . $e->getTraceAsString());
-            return ['error' => "OpenAI API request failed: " . $e->getMessage()];
+            return ['error' => ChatErrorMessages::fromOpenAiError($e->getMessage())];
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Specification prompt block builder
+    // -----------------------------------------------------------------------
+
+    /**
+     * Normalize schema column definitions to a flat list of column names for prompts/SQL hints.
+     *
+     * @param  array<mixed> $columns
+     * @return list<string>
+     */
+    private function flattenSchemaColumnsForSql(array $columns): array
+    {
+        $flat = [];
+        foreach ($columns as $ck => $cv) {
+            if (\is_string($ck) && !\is_int($ck)) {
+                $flat[] = $ck;
+            } elseif (\is_int($ck) && \is_string($cv)) {
+                $flat[] = $cv;
+            }
+        }
+
+        return $flat;
+    }
+
+    /**
+     * Build the STRICT SPECIFICATION MODE section that is appended to the base
+     * SQL generation prompt when a specification file is active.
+     *
+     * The block does three things:
+     *  1. Repeats the allowed tables/columns so the model cannot "forget" them.
+     *  2. Injects the most relevant specification chunks (retrieved by RAG).
+     *  3. Instructs the model to refuse with a plain-English message (not SQL)
+     *     if the question falls outside the allowed scope.
+     *
+     * @param  array<int, array{role: string, content: string}> $history
+     * @param  string $userQuery Current user question.
+     * @return string
+     */
+    private function buildConversationHistoryBlock(array $history, string $userQuery): string
+    {
+        if ($history === []) {
+            return '';
+        }
+
+        $lines   = [];
+        $lines[] = 'CONVERSATION HISTORY (multi-turn context — resolve pronouns and follow-ups like "those", "same period", "show more"):';
+        foreach ($history as $turn) {
+            $role    = ($turn['role'] ?? '') === 'assistant' ? 'Assistant' : 'User';
+            $content = trim((string) ($turn['content'] ?? ''));
+            if ($content === '') {
+                continue;
+            }
+            $lines[] = "{$role}: {$content}";
+        }
+        $lines[] = '';
+        $lines[] = "CURRENT QUESTION (generate SQL for this): {$userQuery}";
+        $lines[] = 'If the current question refers to prior results (e.g. "them", "those orders", "last month instead"), use the conversation above to infer filters, tables, and time ranges.';
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * @param  array  $ctx  Specification context from QueryController::buildSpecificationContext()
+     * @param  string $userQuery
+     * @return string
+     */
+    private function buildSpecificationPromptBlock(array $ctx, string $userQuery): string
+    {
+        $allowlist    = $ctx['allowlist']      ?? [];
+        $chunks       = $ctx['chunks']         ?? [];
+        $rulesSummary = $ctx['rules_summary']  ?? '';
+
+        $lines = [];
+        $lines[] = "════════════════════════════════════════════════════════";
+        $lines[] = "STRICT SPECIFICATION MODE — HIGHEST PRIORITY RULES";
+        $lines[] = "════════════════════════════════════════════════════════";
+        $lines[] = "The administrator has uploaded a specification file that defines exactly which";
+        $lines[] = "data you are permitted to access and how to interpret it.";
+        $lines[] = "";
+        $lines[] = "ABSOLUTE RULES (override all other instructions above):";
+        $lines[] = "1. You MUST use ONLY the tables and columns listed in the ALLOWED SCHEMA below.";
+        $lines[] = "   The schema passed earlier is already filtered — do not use any other table.";
+        $lines[] = "2. You MUST apply the business rules described in the SPECIFICATION EXCERPTS below.";
+        $lines[] = "3. If the user's question CANNOT be answered using only the allowed schema and";
+        $lines[] = "   specification, respond with EXACTLY this format (no SQL, no markdown):";
+        $lines[] = "   SPEC_REFUSAL: <short plain-English reason why the question is out of scope>";
+        $lines[] = "   Example: SPEC_REFUSAL: Your specification only covers order analytics; customer personal data is not in scope.";
+        $lines[] = "4. DO NOT generate SQL that accesses any table not listed below, even if it";
+        $lines[] = "   appears in the schema provided above.";
+        $lines[] = "";
+
+        // Allowed tables summary
+        if (!empty($allowlist)) {
+            $lines[] = "ALLOWED TABLES AND COLUMNS (from specification):";
+            foreach ($allowlist as $suffix => $cols) {
+                $colStr  = (is_array($cols) && in_array('*', $cols, true)) ? 'ALL COLUMNS' : implode(', ', (array) $cols);
+                $lines[] = "  - $suffix → $colStr";
+            }
+            $lines[] = "";
+        }
+
+        // Rules summary
+        if ($rulesSummary) {
+            $lines[] = "BUSINESS RULES SUMMARY:";
+            $lines[] = $rulesSummary;
+            $lines[] = "";
+        }
+
+        // Retrieved specification chunks
+        if (!empty($chunks)) {
+            $lines[] = "SPECIFICATION EXCERPTS (most relevant to this question):";
+            foreach ($chunks as $i => $chunk) {
+                $lines[] = "--- Excerpt " . ($i + 1) . " ---";
+                $lines[] = trim($chunk);
+                $lines[] = "";
+            }
+        }
+
+        $lines[] = "════════════════════════════════════════════════════════";
+
+        return implode("\n", $lines);
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL extraction helpers
+    // -----------------------------------------------------------------------
 
     /**
      * ✅ Extract SQL query from OpenAI response

@@ -1,3 +1,195 @@
+/**
+ * Defense-in-depth: never show credential-like fields or hash strings in chat UI.
+ */
+function heytrishaIsSensitiveChatKey(key) {
+    if (typeof key !== "string" || !key) return false;
+    const l = key.toLowerCase();
+    const needles = [
+        "password", "passwd", "user_pass", "pass_hash", "secret", "api_key", "apikey",
+        "consumer_secret", "access_token", "refresh_token", "auth_token", "openai",
+        "payment_token", "card", "cvv", "cvc", "nonce_key", "private_key"
+    ];
+    return needles.some(function (n) { return l.indexOf(n) !== -1; });
+}
+function heytrishaRedactChatString(text) {
+    if (typeof text !== "string" || !text) return text;
+    return text
+        .replace(/\$2[ayb]\$[.\/0-9A-Za-z]{50,}/g, "[REDACTED]")
+        .replace(/\$P\$[.\/A-Za-z0-9]{30,}/g, "[REDACTED]")
+        .replace(/\$wp\$2[ayb]\$[^\s'"]{20,}/g, "[REDACTED]")
+        .replace(/\bsk-[a-zA-Z0-9]{10,}\b/g, "[REDACTED]")
+        .replace(/\bsk_(live|test)_[a-zA-Z0-9]{10,}\b/g, "[REDACTED]")
+        .replace(/\b(pk|rk)_(live|test)_[a-zA-Z0-9]{10,}\b/g, "[REDACTED]");
+}
+/** Extract user-facing message from WordPress AJAX / API JSON (handles nested wp_send_json_error). */
+function heytrishaExtractResponseMessage(data) {
+    if (!data || typeof data !== "object") return null;
+    if (data.message && typeof data.message === "string") return data.message;
+    if (data.data && typeof data.data === "object" && typeof data.data.message === "string") return data.data.message;
+    if (data.details && typeof data.details === "string") return data.details;
+    return null;
+}
+/** Inline SVG icons (Material-style paths) — consistent rendering vs emoji/Unicode */
+function heytrishaUiIconWrap(svgNode, size) {
+    var s = size == null ? 18 : size;
+    return React.createElement(
+        "span",
+        {
+            className: "heytrisha-ui-icon",
+            style: {
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 0,
+                width: s + "px",
+                height: s + "px",
+                flexShrink: 0,
+                color: "currentColor"
+            }
+        },
+        svgNode
+    );
+}
+function heytrishaSvgPathIcon(size, pathD, viewBox) {
+    var s = size == null ? 18 : size;
+    var vb = viewBox || "0 0 24 24";
+    return heytrishaUiIconWrap(
+        React.createElement(
+            "svg",
+            {
+                width: s,
+                height: s,
+                viewBox: vb,
+                fill: "currentColor",
+                xmlns: "http://www.w3.org/2000/svg",
+                "aria-hidden": "true",
+                focusable: "false"
+            },
+            React.createElement("path", { d: pathD })
+        ),
+        s
+    );
+}
+function heytrishaChartBarIcon(size) {
+    return heytrishaSvgPathIcon(size, "M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2v-7h-2v7zm4 0h2V11h-2v8z");
+}
+function heytrishaClipboardIcon(size) {
+    return heytrishaSvgPathIcon(size, "M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 16H5V5h2v3h10V5h2v14z");
+}
+function heytrishaWarningIcon(size) {
+    return heytrishaSvgPathIcon(size, "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z");
+}
+function heytrishaCheckIcon(size) {
+    return heytrishaSvgPathIcon(size, "M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z");
+}
+function heytrishaCloseIcon(size) {
+    return heytrishaSvgPathIcon(size, "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z");
+}
+function heytrishaPersonIcon(size) {
+    return heytrishaSvgPathIcon(size, "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z");
+}
+function heytrishaChatBubbleIcon(size) {
+    return heytrishaSvgPathIcon(size, "M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z");
+}
+function heytrishaMinimizeBarIcon(size) {
+    return heytrishaSvgPathIcon(size, "M19 13H5v-2h14v2z");
+}
+function heytrishaPlusIcon(size) {
+    return heytrishaSvgPathIcon(size, "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z");
+}
+function heytrishaChevronRightIcon(size) {
+    return heytrishaSvgPathIcon(size, "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z");
+}
+function heytrishaMenuIcon(size) {
+    return heytrishaSvgPathIcon(size, "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z");
+}
+function heytrishaListBulletsIcon(size) {
+    return heytrishaSvgPathIcon(size, "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z");
+}
+/** Crisp send (paper plane) icon — avoids fuzzy Unicode arrows in round buttons */
+function heytrishaSendIconSvg(size) {
+    var s = size == null ? 22 : size;
+    return React.createElement(
+        "span",
+        { className: "heytrisha-send-icon", style: { display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 0 } },
+        React.createElement(
+            "svg",
+            {
+                width: s,
+                height: s,
+                viewBox: "0 0 24 24",
+                fill: "currentColor",
+                xmlns: "http://www.w3.org/2000/svg",
+                "aria-hidden": "true",
+                focusable: "false"
+            },
+            React.createElement("path", {
+                d: "M2.01 21L23 12 2.01 3 2 10l15 2-15 2v7z"
+            })
+        )
+    );
+}
+
+function heytrishaRedactChatPayload(data) {
+    if (data == null) return data;
+    if (typeof data === "string") return heytrishaRedactChatString(data);
+    if (Array.isArray(data)) return data.map(heytrishaRedactChatPayload);
+    if (typeof data === "object") {
+        const out = {};
+        Object.keys(data).forEach(function (k) {
+            if (heytrishaIsSensitiveChatKey(k)) return;
+            if (k === "sql" || k === "sql_query" || k === "raw_sql") return;
+            out[k] = heytrishaRedactChatPayload(data[k]);
+        });
+        return out;
+    }
+    return data;
+}
+
+/** Build prior turns for multi-turn API context (role + plain text only). */
+function heytrishaBuildConversationHistory(messageList, maxTurns) {
+    var limit = maxTurns == null ? 20 : maxTurns;
+    if (!Array.isArray(messageList) || messageList.length === 0) {
+        return [];
+    }
+    var turns = [];
+    messageList.forEach(function (m) {
+        if (!m) return;
+        var role = m.sender === "user" || m.role === "user" ? "user" : "assistant";
+        var text = (m.text || m.content || "").trim();
+        if (!text) return;
+        turns.push({ role: role, content: text });
+    });
+    if (turns.length > limit) {
+        turns = turns.slice(-limit);
+    }
+    return turns;
+}
+
+/**
+ * Columns that carry no end-user value in chat results.
+ * Checked as lowercase substrings / exact matches against the column key.
+ */
+var HEYTRISHA_LOW_VALUE_COLUMNS = [
+    "post_author", "post_date_gmt", "post_modified_gmt", "post_modified",
+    "post_content_filtered", "post_parent", "post_mime_type", "post_password",
+    "post_name", "post_type", "comment_count", "comment_status", "ping_status",
+    "to_ping", "pinged", "guid", "menu_order",
+    "ip_address", "customer_ip_address", "cart_hash", "transaction_id",
+    "date_updated_gmt", "date_completed_gmt", "date_paid_gmt",
+    "payment_method_title", "customer_note",
+    "billing_index", "shipping_index"
+];
+function heytrishaIsLowValueColumn(key) {
+    if (typeof key !== "string" || !key) return false;
+    var l = key.toLowerCase();
+    for (var i = 0; i < HEYTRISHA_LOW_VALUE_COLUMNS.length; i++) {
+        if (l === HEYTRISHA_LOW_VALUE_COLUMNS[i]) return true;
+    }
+    if (l.endsWith("_gmt")) return true;
+    return false;
+}
+
 // Wait for both DOM and React to be ready
 function initChatbot() {
     // Check if React and ReactDOM are available
@@ -23,7 +215,7 @@ function initChatbot() {
         const [messages, setMessages] = React.useState([
             { 
                 sender: "bot", 
-                text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?", 
+                text: "Hello! I'm Trisha, your AI assistant. How can I help you today?", 
                 timestamp: new Date() 
             }
         ]);
@@ -32,15 +224,90 @@ function initChatbot() {
         const [isTyping, setIsTyping] = React.useState(false);
         const [pendingConfirmation, setPendingConfirmation] = React.useState(null);
         const [currentChatId, setCurrentChatId] = React.useState(null);
-        const messagesEndRef = React.useRef(null);
+        const [schemaRefreshNotice, setSchemaRefreshNotice] = React.useState(null);
+        const messagesScrollRef = React.useRef(null);
         const inputRef = React.useRef(null);
+
+        const getViewportSize = () => {
+            // Prefer visualViewport for mobile keyboards / dynamic toolbars
+            const vv = window.visualViewport;
+            const w = Math.max(0, Math.floor((vv && vv.width) ? vv.width : window.innerWidth));
+            const h = Math.max(0, Math.floor((vv && vv.height) ? vv.height : window.innerHeight));
+            return { w, h };
+        };
+
+        const [viewport, setViewport] = React.useState(getViewportSize());
+
+        React.useEffect(() => {
+            const update = () => setViewport(getViewportSize());
+            window.addEventListener("resize", update);
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener("resize", update);
+                window.visualViewport.addEventListener("scroll", update);
+            }
+            return () => {
+                window.removeEventListener("resize", update);
+                if (window.visualViewport) {
+                    window.visualViewport.removeEventListener("resize", update);
+                    window.visualViewport.removeEventListener("scroll", update);
+                }
+            };
+        }, []);
         
+        // Realtime sync when schema/spec is uploaded from Settings (same or other admin tab)
+        React.useEffect(() => {
+            const msg = (window.heytrishaConfig && window.heytrishaConfig.schemaUpdatedMessage) ||
+                "Database schema was updated. Your next message will use the new definition.";
+
+            const show = () => {
+                setSchemaRefreshNotice(msg);
+                window.setTimeout(function () {
+                    setSchemaRefreshNotice(null);
+                }, 20000);
+            };
+
+            const onCustom = function () {
+                show();
+            };
+            const onStorage = function (ev) {
+                if (ev.key === "heytrisha_schema_revision") {
+                    show();
+                }
+            };
+
+            var bc = null;
+            try {
+                bc = new BroadcastChannel("heytrisha-schema-sync");
+                bc.onmessage = function () {
+                    show();
+                };
+            } catch (e1) {}
+
+            window.addEventListener("heytrisha-schema-updated", onCustom);
+            window.addEventListener("storage", onStorage);
+
+            return function () {
+                window.removeEventListener("heytrisha-schema-updated", onCustom);
+                window.removeEventListener("storage", onStorage);
+                if (bc) {
+                    try {
+                        bc.close();
+                    } catch (e2) {}
+                }
+            };
+        }, []);
+
         // REST API config kept for potential future use
         // Chat operations now use admin-ajax.php for shared hosting compatibility
 
-        // Auto-scroll to bottom when new message arrives
+        // Scroll only the chat transcript (scrollIntoView can scroll the host page)
         React.useEffect(() => {
-            messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            const el = messagesScrollRef.current;
+            if (!el) return;
+            const id = window.requestAnimationFrame(() => {
+                el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            });
+            return () => window.cancelAnimationFrame(id);
         }, [messages, isTyping]);
 
         // Focus input when chat opens
@@ -69,7 +336,7 @@ function initChatbot() {
             if (!chatAjaxUrl || !chatNonce) {
                 setMessages([{
                     sender: "bot",
-                    text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                    text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                     timestamp: new Date()
                 }]);
                 return;
@@ -91,7 +358,7 @@ function initChatbot() {
                     console.warn('Chat API not available, continuing without chat history');
                     setMessages([{
                         sender: "bot",
-                        text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                        text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                         timestamp: new Date()
                     }]);
                     return;
@@ -123,7 +390,7 @@ function initChatbot() {
                             setCurrentChatId(createResult.data.id);
                             setMessages([{
                                 sender: "bot",
-                                text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                                text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                                 timestamp: new Date()
                             }]);
                         }
@@ -131,7 +398,7 @@ function initChatbot() {
                         console.warn('Chat creation failed, continuing without chat history');
                         setMessages([{
                             sender: "bot",
-                            text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                            text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                             timestamp: new Date()
                         }]);
                     }
@@ -140,7 +407,7 @@ function initChatbot() {
                 console.warn('Failed to create/load chat, continuing without chat history:', error);
                 setMessages([{
                     sender: "bot",
-                    text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                    text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                     timestamp: new Date()
                 }]);
             }
@@ -236,7 +503,7 @@ function initChatbot() {
                     });
                     setMessages(formattedMessages.length > 0 ? formattedMessages : [{
                         sender: "bot",
-                        text: "Hello! 👋 I'm Trisha, your AI assistant. How can I help you today?",
+                        text: "Hello! I'm Trisha, your AI assistant. How can I help you today?",
                         timestamp: new Date()
                     }]);
                 }
@@ -410,7 +677,7 @@ function initChatbot() {
                             gap: "6px"
                         } 
                     }, 
-                        React.createElement("span", null, "📊"),
+                        heytrishaChartBarIcon(16),
                         React.createElement("span", null, formattedData.summary)
                     ),
                     React.createElement("div", {
@@ -425,7 +692,7 @@ function initChatbot() {
                     },
                         displayData.map((item, idx) => {
                             const entries = Object.entries(item).filter(([key]) => 
-                                !key.includes('_meta') && !key.includes('_cache')
+                                !key.includes('_meta') && !key.includes('_cache') && !heytrishaIsSensitiveChatKey(key) && !heytrishaIsLowValueColumn(key)
                             );
                             
                             return React.createElement("div", {
@@ -444,11 +711,8 @@ function initChatbot() {
                                         .replace(/Id/g, "ID")
                                         .replace(/Url/g, "URL");
                                     
-                                    const displayValue = value === null || value === undefined 
-                                        ? "N/A" 
-                                        : String(value).length > 100 
-                                            ? String(value).substring(0, 100) + "..." 
-                                            : String(value);
+                                    const rawVal = value === null || value === undefined ? "N/A" : heytrishaRedactChatString(String(value));
+                                    const displayValue = rawVal === "N/A" ? "N/A" : (rawVal.length > 100 ? rawVal.substring(0, 100) + "..." : rawVal);
                                     
                                     return React.createElement("div", {
                                         key: i,
@@ -496,8 +760,8 @@ function initChatbot() {
             }
 
             if (formattedData.type === "card") {
-                const entries = Object.entries(formattedData.content).filter(([key]) => 
-                    key !== 'title' && key !== 'name' && key !== 'post_title' && key !== 'product_name'
+                const entries = Object.entries(formattedData.content).filter(([key]) =>
+                    key !== 'title' && key !== 'name' && key !== 'post_title' && key !== 'product_name' && !heytrishaIsSensitiveChatKey(key) && !heytrishaIsLowValueColumn(key)
                 );
                 
                 return React.createElement("div", {
@@ -515,9 +779,15 @@ function initChatbot() {
                             fontWeight: "700", 
                             fontSize: "16px", 
                             marginBottom: "12px", 
-                            color: "#1e40af" 
+                            color: "#1e40af",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px"
                         } 
-                    }, `📋 ${formattedData.title}`),
+                    },
+                        heytrishaClipboardIcon(18),
+                        React.createElement("span", null, formattedData.title)
+                    ),
                     entries.slice(0, 10).map(([key, value], i) => {
                         const readableKey = key
                             .replace(/_/g, " ")
@@ -547,14 +817,14 @@ function initChatbot() {
                                     wordBreak: "break-word",
                                     flex: 1
                                 } 
-                            }, value === null || value === undefined ? "N/A" : String(value))
+                            }, value === null || value === undefined ? "N/A" : heytrishaRedactChatString(String(value)))
                         );
                     })
                 );
             }
 
             if (formattedData.type === "details") {
-                const entries = Object.entries(formattedData.content);
+                const entries = Object.entries(formattedData.content).filter(([key]) => !heytrishaIsSensitiveChatKey(key) && !heytrishaIsLowValueColumn(key));
                 return React.createElement("div", {
                     style: {
                         marginTop: "12px",
@@ -593,7 +863,7 @@ function initChatbot() {
                                     wordBreak: "break-word",
                                     flex: 1
                                 } 
-                            }, value === null || value === undefined ? "N/A" : String(value))
+                            }, value === null || value === undefined ? "N/A" : heytrishaRedactChatString(String(value)))
                         );
                     })
                 );
@@ -606,9 +876,15 @@ function initChatbot() {
                             marginBottom: "10px", 
                             fontWeight: "600", 
                             color: "#1e40af",
-                            fontSize: "13px"
+                            fontSize: "13px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px"
                         } 
-                    }, `📋 ${formattedData.summary}`),
+                    },
+                        heytrishaListBulletsIcon(16),
+                        React.createElement("span", null, formattedData.summary)
+                    ),
                     React.createElement("ul", { 
                         style: { 
                             margin: 0, 
@@ -636,6 +912,8 @@ function initChatbot() {
         const handleSendMessage = async (confirmed = false, confirmationData = null) => {
             const queryText = confirmed ? inputText : (inputText.trim() || "");
             if (!queryText && !confirmed) return;
+
+            const conversationHistoryForApi = heytrishaBuildConversationHistory(messages);
 
             if (!confirmed) {
                 console.log("✅ Sending message:", queryText);
@@ -717,7 +995,7 @@ function initChatbot() {
                     formData.append('endpoint', 'query');
                     
                     // Debug: Log FormData contents
-                    console.log('📤 FormData contents:');
+                        console.log('FormData contents:');
                     for (let pair of formData.entries()) {
                         console.log('  ' + pair[0] + ': ' + (pair[0] === 'nonce' ? pair[1].substring(0, 10) + '...' : pair[1]));
                     }
@@ -731,6 +1009,12 @@ function initChatbot() {
                     }
                     if (requestBody.confirmation_data) {
                         formData.append('confirmation_data', JSON.stringify(requestBody.confirmation_data));
+                    }
+                    if (currentChatId) {
+                        formData.append('chat_id', String(currentChatId));
+                    }
+                    if (conversationHistoryForApi.length > 0) {
+                        formData.append('conversation_history', JSON.stringify(conversationHistoryForApi));
                     }
                     
                     response = await fetch(ajaxUrl, {
@@ -755,11 +1039,18 @@ function initChatbot() {
                     }
                 }
 
-                if (!response.ok) {
-                    throw new Error(`Server error: ${response.status} ${response.statusText}`);
-                }
-
                 let data = await response.json();
+
+                if (!response.ok) {
+                    const apiMsg = heytrishaExtractResponseMessage(data);
+                    throw new Error(apiMsg || `Server error: ${response.status} ${response.statusText}`);
+                }
+                // Never surface secrets or password hashes in the widget (defense in depth).
+                if (data && typeof data === "object") {
+                    if (data.message) data.message = heytrishaRedactChatString(data.message);
+                    if (data.confirmation_message) data.confirmation_message = heytrishaRedactChatString(data.confirmation_message);
+                    if (data.data !== undefined && data.data !== null) data.data = heytrishaRedactChatPayload(data.data);
+                }
                 console.log("✅ API Response:", data);
 
                 setIsTyping(false);
@@ -830,7 +1121,7 @@ function initChatbot() {
                     setPendingConfirmation(null);
                     const errorMessage = {
                         sender: "bot",
-                        text: data.message || "Sorry, I couldn't process that request. Please try again or rephrase your query.",
+                        text: heytrishaExtractResponseMessage(data) || "Sorry, I couldn't process that request. Please try again or rephrase your query.",
                         timestamp: new Date()
                     };
                     setMessages(prevMessages => [...prevMessages, errorMessage]);
@@ -845,14 +1136,11 @@ function initChatbot() {
                 setIsTyping(false);
                 setPendingConfirmation(null);
                 
-                // Better error messages
-                let errorMessage = "Sorry, something went wrong! ";
-                if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-                    errorMessage += "The server took too long to respond. Please try again in a moment.";
-                } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-                    errorMessage += "Could not connect to the API server. Please check if the server is running.";
-                } else {
-                    errorMessage += error.message || "Please check if the API server is running.";
+                let errorMessage = error.message || "Sorry, something went wrong. Please try again.";
+                if (error.message && (error.message.includes('timeout') || error.message.includes('Timeout'))) {
+                    errorMessage = "Sorry, the server took too long to respond. Please try again in a moment.";
+                } else if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+                    errorMessage = "Sorry, could not connect to the server. Please check your API configuration in HeyTrisha settings.";
                 }
                 
                 setMessages(prevMessages => [...prevMessages, { 
@@ -919,14 +1207,18 @@ function initChatbot() {
             console.warn('HeyTrisha: pluginUrl is not set. Images may not load correctly.');
         }
 
+        const edge = viewport.w && viewport.w < 420 ? 12 : 20;
+        const expandedWidthPx = Math.min(420, Math.max(320, (viewport.w || 360) - (edge * 2)));
+        const expandedHeightPx = Math.min(650, Math.max(420, (viewport.h || 550) - (edge * 2)));
+
         return React.createElement("div", {
             className: "heytrisha-chatbot-container",
             style: {
-                width: isMinimized ? "64px" : "360px",
-                height: isMinimized ? "64px" : "550px",
+                width: isMinimized ? "64px" : `${expandedWidthPx}px`,
+                height: isMinimized ? "64px" : `${expandedHeightPx}px`,
                 position: "fixed",
-                bottom: "20px",
-                right: "20px",
+                bottom: `${edge}px`,
+                right: `${edge}px`,
                 backgroundColor: "white",
                 borderRadius: "20px",
                 zIndex: "999999",
@@ -935,7 +1227,10 @@ function initChatbot() {
                 display: "flex",
                 flexDirection: "column",
                 fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif",
-                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                maxWidth: `calc(100vw - ${edge * 2}px)`,
+                maxHeight: `calc(100vh - ${edge * 2}px)`,
+                boxSizing: "border-box"
             }
         }, 
             // Minimized state - floating button
@@ -958,10 +1253,10 @@ function initChatbot() {
             },
                 React.createElement("div", { 
                     style: { 
-                        fontSize: "32px",
+                        color: "#fff",
                         filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.2))"
                     } 
-                }, "💬")
+                }, heytrishaChatBubbleIcon(34))
             ),
 
             // Full chat interface
@@ -1021,25 +1316,62 @@ function initChatbot() {
                         )
                     ),
                     React.createElement("button", {
+                        type: "button",
+                        "aria-label": "Minimize chat",
                         onClick: () => setIsMinimized(true),
                         style: {
                             background: "rgba(255,255,255,0.2)",
                             border: "none",
                             color: "white",
-                            fontSize: "20px",
                             cursor: "pointer",
                             padding: "8px 12px",
                             borderRadius: "8px",
-                            transition: "background 0.2s"
+                            transition: "background 0.2s",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center"
                         },
                         onMouseEnter: (e) => e.currentTarget.style.background = "rgba(255,255,255,0.3)",
                         onMouseLeave: (e) => e.currentTarget.style.background = "rgba(255,255,255,0.2)"
-                    }, "−")
+                    }, heytrishaMinimizeBarIcon(22))
+                ),
+
+                schemaRefreshNotice && React.createElement("div", {
+                    style: {
+                        padding: "10px 14px",
+                        backgroundColor: "#e0f2fe",
+                        color: "#0c4a6e",
+                        fontSize: "13px",
+                        lineHeight: 1.45,
+                        borderBottom: "1px solid #bae6fd",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "10px"
+                    }
+                },
+                    React.createElement("span", { style: { flex: 1 } }, schemaRefreshNotice),
+                    React.createElement("button", {
+                        type: "button",
+                        onClick: function () {
+                            setSchemaRefreshNotice(null);
+                        },
+                        style: {
+                            flexShrink: 0,
+                            border: "none",
+                            background: "transparent",
+                            color: "#0369a1",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: 600
+                        }
+                    }, "Dismiss")
                 ),
 
                 // Messages area
                 React.createElement("div", {
                     className: "heytrisha-chatbot-messages",
+                    ref: messagesScrollRef,
                     style: {
                         flex: 1,
                         overflowY: "auto",
@@ -1126,9 +1458,15 @@ function initChatbot() {
                                             fontWeight: "700", 
                                             marginBottom: "12px", 
                                             fontSize: "13px",
-                                            color: msg.sender === "bot" ? "#856404" : "white"
+                                            color: msg.sender === "bot" ? "#856404" : "white",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "8px"
                                         } 
-                                    }, "⚠️ Confirmation Required"),
+                                    },
+                                        heytrishaWarningIcon(18),
+                                        React.createElement("span", null, "Confirmation required")
+                                    ),
                                     React.createElement("div", { 
                                         style: { 
                                             display: "flex", 
@@ -1137,6 +1475,7 @@ function initChatbot() {
                                         } 
                                     },
                                         React.createElement("button", {
+                                            type: "button",
                                             onClick: handleConfirm,
                                             style: {
                                                 padding: "10px 20px",
@@ -1148,7 +1487,10 @@ function initChatbot() {
                                                 fontWeight: "600",
                                                 fontSize: "13px",
                                                 transition: "all 0.2s",
-                                                boxShadow: "0 2px 4px rgba(40, 167, 69, 0.3)"
+                                                boxShadow: "0 2px 4px rgba(40, 167, 69, 0.3)",
+                                                display: "inline-flex",
+                                                alignItems: "center",
+                                                gap: "6px"
                                             },
                                             onMouseEnter: (e) => {
                                                 e.currentTarget.style.backgroundColor = "#218838";
@@ -1158,20 +1500,27 @@ function initChatbot() {
                                                 e.currentTarget.style.backgroundColor = "#28a745";
                                                 e.currentTarget.style.transform = "translateY(0)";
                                             }
-                                        }, "✓ Confirm"),
+                                        },
+                                            heytrishaCheckIcon(16),
+                                            React.createElement("span", null, "Confirm")
+                                        ),
                                         React.createElement("button", {
+                                            type: "button",
                                             onClick: handleCancel,
                                             style: {
                                                 padding: "10px 20px",
                                                 backgroundColor: "#dc3545",
                                                 color: "white",
                                                 border: "none",
-                                borderRadius: "8px",
+                                                borderRadius: "8px",
                                                 cursor: "pointer",
                                                 fontWeight: "600",
                                                 fontSize: "13px",
                                                 transition: "all 0.2s",
-                                                boxShadow: "0 2px 4px rgba(220, 53, 69, 0.3)"
+                                                boxShadow: "0 2px 4px rgba(220, 53, 69, 0.3)",
+                                                display: "inline-flex",
+                                                alignItems: "center",
+                                                gap: "6px"
                                             },
                                             onMouseEnter: (e) => {
                                                 e.currentTarget.style.backgroundColor = "#c82333";
@@ -1181,7 +1530,10 @@ function initChatbot() {
                                                 e.currentTarget.style.backgroundColor = "#dc3545";
                                                 e.currentTarget.style.transform = "translateY(0)";
                                             }
-                                        }, "✗ Cancel")
+                                        },
+                                            heytrishaCloseIcon(16),
+                                            React.createElement("span", null, "Cancel")
+                                        )
                                     )
                                 )
                             ),
@@ -1196,10 +1548,10 @@ function initChatbot() {
                                     justifyContent: "center",
                                     marginLeft: "10px",
                                     flexShrink: 0,
-                                    fontSize: "20px",
+                                    color: "#fff",
                                     boxShadow: "0 2px 8px rgba(102, 126, 234, 0.3)"
                                 }
-                            }, "👤")
+                            }, heytrishaPersonIcon(22))
                     )
                 ),
                 isTyping && React.createElement("div", {
@@ -1270,8 +1622,7 @@ function initChatbot() {
                                 } 
                             })
                         )
-                    ),
-                    React.createElement("div", { ref: messagesEndRef })
+                    )
                 ),
 
                 // Input area
@@ -1289,7 +1640,7 @@ function initChatbot() {
                     type: "text",
                     value: inputText,
                     onChange: (e) => setInputText(e.target.value),
-                            onKeyPress: (e) => {
+                            onKeyDown: (e) => {
                                 if (e.key === "Enter" && !pendingConfirmation && !e.shiftKey) {
                                     e.preventDefault();
                                     handleSendMessage();
@@ -1318,6 +1669,8 @@ function initChatbot() {
                             }
                 }),
                 React.createElement("button", { 
+                            type: "button",
+                            "aria-label": "Send message",
                             onClick: () => !pendingConfirmation && handleSendMessage(),
                             disabled: !!pendingConfirmation || !inputText.trim(),
                             style: {
@@ -1333,7 +1686,6 @@ function initChatbot() {
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "center",
-                                fontSize: "22px",
                                 transition: "all 0.2s",
                                 boxShadow: pendingConfirmation || !inputText.trim() 
                                     ? "none" 
@@ -1347,7 +1699,7 @@ function initChatbot() {
                             onMouseLeave: (e) => {
                                 e.currentTarget.style.transform = "scale(1)";
                             }
-                        }, "➤")
+                        }, heytrishaSendIconSvg(22))
                     )
                 )
             )

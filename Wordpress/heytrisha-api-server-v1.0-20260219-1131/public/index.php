@@ -10,14 +10,17 @@ ini_set('display_startup_errors', '0');
 // Start output buffering early to catch any stray output from other plugins
 ob_start();
 
-// Handle utility scripts (clear-cache.php, key-generator.php, database-installer.php)
-// These should run BEFORE Laravel loads
+// Determine local/dev mode for standalone debug handlers (do not default to "on").
+$appEnv = getenv('APP_ENV') ?: '';
+$appDebug = getenv('APP_DEBUG') ?: '';
+$isLocal = ($appEnv === 'local') || ($appDebug === 'true' || $appDebug === '1');
+
+// Optional utility scripts (e.g. key-generator.php) — run BEFORE Laravel if present
 $request_uri = $_SERVER['REQUEST_URI'] ?? '';
 $path = parse_url($request_uri, PHP_URL_PATH);
 $script_name = basename($path);
 
-// Allow utility scripts to run directly
-$utility_scripts = ['clear-cache.php', 'key-generator.php', 'database-installer.php'];
+$utility_scripts = ['key-generator.php', 'database-installer.php'];
 if (in_array($script_name, $utility_scripts)) {
     $script_path = __DIR__ . '/' . $script_name;
     if (file_exists($script_path)) {
@@ -213,6 +216,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // STANDALONE: /api/query endpoint (bypasses Laravel)
 // ============================================================================
 if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    require_once __DIR__ . '/../app/Support/SearchSynonyms.php';
+    require_once __DIR__ . '/../app/Support/SqlTextSearchBroadener.php';
     
     // 1. Get API key from Authorization header
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
@@ -274,20 +280,38 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
     $order_storage = $body['order_storage'] ?? 'unknown'; // 'hpos', 'legacy', or 'unknown'
     $table_prefix = $body['table_prefix'] ?? 'wp_';
     
-    // 5. Get OpenAI key from site record (decrypt it)
+    // 5. OpenAI key: X-HeyTrisha-OpenAI-Key from plugin first, then this site's encrypted row only
+    $plugin_openai = '';
+    if (function_exists('getallheaders')) {
+        $hdrs = getallheaders();
+        if (is_array($hdrs)) {
+            foreach ($hdrs as $hname => $hval) {
+                if (strcasecmp((string) $hname, 'X-HeyTrisha-OpenAI-Key') === 0) {
+                    $plugin_openai = trim((string) $hval);
+                    break;
+                }
+            }
+        }
+    }
+    foreach (['HTTP_X_HEYTRISHA_OPENAI_KEY', 'REDIRECT_HTTP_X_HEYTRISHA_OPENAI_KEY'] as $_hk) {
+        if ($plugin_openai === '' && !empty($_SERVER[$_hk])) {
+            $plugin_openai = trim((string) $_SERVER[$_hk]);
+            break;
+        }
+    }
+
     $env = heytrisha_load_env();
     $app_key = $env['APP_KEY'] ?? '';
-    $openai_key = heytrisha_decrypt_value($site['openai_key'] ?? '', $app_key);
-    
-    // Fallback: try .env OPENAI_API_KEY
-    if (empty($openai_key)) {
-        $openai_key = $env['OPENAI_API_KEY'] ?? '';
+    if (strlen($plugin_openai) >= 20) {
+        $openai_key = $plugin_openai;
+    } else {
+        $openai_key = heytrisha_decrypt_value($site['openai_key'] ?? '', $app_key);
     }
-    
+
     if (empty($openai_key)) {
         heytrisha_json_response([
             'success' => false,
-            'message' => 'OpenAI API key not configured. Please set it in plugin settings or API .env file.'
+            'message' => 'OpenAI API key not configured. Add it in the HeyTrisha WordPress plugin settings (it is sent on each request) or update the key for this site via PUT /api/config.'
         ], 500);
     }
     
@@ -372,6 +396,7 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
     $users_table = '';
     $order_stats_table = '';
     $order_product_lookup_table = '';
+    $product_meta_lookup_table = '';
     $customer_lookup_table = '';
     $order_items_table = '';
     $order_itemmeta_table = '';
@@ -382,6 +407,7 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
         if (preg_match('/(?<![a-z_])users$/', $t)) $users_table = $t;
         if (preg_match('/wc_order_stats$/', $t)) $order_stats_table = $t;
         if (preg_match('/wc_order_product_lookup$/', $t)) $order_product_lookup_table = $t;
+        if (preg_match('/wc_product_meta_lookup$/', $t)) $product_meta_lookup_table = $t;
         if (preg_match('/wc_customer_lookup$/', $t)) $customer_lookup_table = $t;
         if (preg_match('/woocommerce_order_items$/', $t)) $order_items_table = $t;
         if (preg_match('/woocommerce_order_itemmeta$/', $t)) $order_itemmeta_table = $t;
@@ -551,6 +577,21 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
               "- ALWAYS use case-insensitive matching: LOWER(column_name) = LOWER('processing') OR column_name LIKE '%processing%'\n" .
               "- If the status column contains slugs like 'wc-processing', use: WHERE column_name LIKE '%processing%'\n" .
               "\n" .
+              \App\Support\SearchSynonyms::promptBlock() .
+              "WOOCOMMERCE STOCK / INVENTORY RULES (CRITICAL — STOCK IS NOT A POSTS COLUMN):\n" .
+              "- 🚨 The posts table has NO 'stock_status' or 'stock_quantity' column. NEVER write posts.stock_status — it causes an 'Unknown column' error.\n" .
+              ($product_meta_lookup_table ?
+              "- ✅ Use {$product_meta_lookup_table}. Its columns are: product_id, stock_status, stock_quantity, min_price, max_price, etc.\n" .
+              "  * 🚨 {$product_meta_lookup_table} does NOT have 'meta_value' or 'meta_key' columns. NEVER select meta_value/meta_key from it — that causes 'Unknown column'.\n" .
+              "  * JOIN it to posts: JOIN {$product_meta_lookup_table} l ON l.product_id = p.ID\n" .
+              "  * In-stock example: SELECT p.ID, p.post_title, l.stock_status, l.stock_quantity FROM {$posts_table} p JOIN {$product_meta_lookup_table} l ON l.product_id = p.ID WHERE p.post_type='product' AND p.post_status NOT IN ('trash','auto-draft') AND l.stock_status LIKE '%instock%' ORDER BY p.post_title ASC LIMIT 100\n"
+              :
+              "- ✅ Use the postmeta table for stock. meta_key='_stock_status' (meta_value 'instock'/'outofstock'/'onbackorder'); meta_key='_stock' for quantity.\n" .
+              "  * In-stock example: SELECT p.ID, p.post_title, pm.meta_value AS stock_status FROM {$posts_table} p JOIN {$postmeta_table} pm ON pm.post_id = p.ID AND pm.meta_key='_stock_status' WHERE p.post_type='product' AND p.post_status NOT IN ('trash','auto-draft') AND pm.meta_value LIKE '%instock%' ORDER BY p.post_title ASC LIMIT 100\n"
+              ) .
+              "- Stock status values are stored WITHOUT spaces ('instock','outofstock','onbackorder'). Match the CORE word with LIKE: 'in stock'/'available' → LIKE '%instock%'; 'out of stock'/'sold out' → LIKE '%outofstock%'; 'backorder' → LIKE '%backorder%'.\n" .
+              "- NEVER filter stock with the user's spaced phrase (stock_status = 'in stock' is WRONG — the stored value is 'instock').\n" .
+              "\n" .
               "CRITICAL WOOCOMMERCE ORDER TABLES & DATE COLUMNS:\n" .
               "- WooCommerce stores orders in multiple tables: wc_order_stats, wc_orders, wc_order_product_lookup, posts (legacy)\n" .
               "- ⚠️⚠️⚠️ CRITICAL: ALWAYS check the schema to find the EXACT date column name - do NOT assume it's 'date_created'\n" .
@@ -582,6 +623,11 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
               "- SELECT both product_id AND post_title AS product_name so users see product names, not just IDs\n" .
               "- ⚠️⚠️⚠️ CRITICAL: When using GROUP BY product_id, you MUST also include post_title in SELECT and GROUP BY\n" .
               "- NEVER return only product_id without product_name - users need to see actual product names\n\n" .
+              \App\Support\SqlTextSearchBroadener::promptRulesBlock() .
+              "PRODUCT CATALOG RULES (CRITICAL):\n" .
+              "- WooCommerce products live in the posts table (post_type='product'). Use posts to list or search products.\n" .
+              "- NEVER use wc_product_meta_lookup alone for catalog questions — products may exist only in posts.\n" .
+              "- Use post_status NOT IN ('trash','auto-draft') unless user asks for published only.\n\n" .
               "CRITICAL RULES:\n" .
               "- Generate ONLY ONE SQL query - never multiple queries separated by semicolons\n" .
               "- If user asks for multiple counts, use subqueries or UNION ALL in a single query\n" .
@@ -738,6 +784,24 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
         ], 400);
     }
     
+    // 12b. Deterministic stock safety net: for a plain "list/show products in/out of stock"
+    // question, build a guaranteed-correct query from the schema (the model often confuses
+    // the product meta lookup table with postmeta and selects a non-existent column).
+    $stockStems = \App\Support\SearchSynonyms::stockStemsFromQuery($question);
+    if ($stockStems !== []) {
+        $mentionsProduct = (bool) preg_match('/\b(product|products|item|items|catalog|inventory|stock)\b/i', $question);
+        $isCount         = (bool) preg_match('/\b(how many|count|number of|total number)\b/i', $question);
+        $hasExtraFilter  = (bool) preg_match('/\b(price|cost|under|over|above|below|cheaper|expensive|category|categories|tag|tags|date|month|year|today|yesterday|week|between|named|titled|called|sku|sale|discount)\b/i', $question);
+
+        if ($mentionsProduct && !$isCount && !$hasExtraFilter) {
+            $stockSql = \App\Support\SqlTextSearchBroadener::buildStockProductSearchSql($schema, $question);
+            if (!empty($stockSql)) {
+                error_log('HeyTrisha: Using deterministic stock-product query for "' . $question . '"');
+                $sql = $stockSql;
+            }
+        }
+    }
+
     // 13. Post-processing: Fix common issues (ported from SQLGeneratorService.php)
     // Check "last N orders" queries for proper LIMIT and ORDER BY
     if (preg_match('/\blast\s+(\d+)\s+orders?\b/i', $question, $limit_matches)) {
@@ -764,6 +828,10 @@ if ((strpos($path, '/api/query') !== false) && $_SERVER['REQUEST_METHOD'] === 'P
             }
         }
     }
+
+    $sql = \App\Support\SqlTextSearchBroadener::broaden($sql, $question);
+    $sql = \App\Support\SqlTextSearchBroadener::broadenStatusFilters($sql, $question);
+    error_log('HeyTrisha: SQL after text-search broadening: ' . substr($sql, 0, 500));
     
     // Build explanation from the question
     $explanation = "Results for: " . $question;
@@ -925,6 +993,10 @@ if (strpos($path, '/api/register') !== false && $_SERVER['REQUEST_METHOD'] === '
 // STANDALONE: /api/diagnostic endpoint  
 // ============================================================================
 if ((strpos($path, '/api/diagnostic') !== false || strpos($path, '/diagnostic') !== false) && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (!$isLocal) {
+        heytrisha_json_response(['error' => 'Not found'], 404);
+    }
+
     $env = heytrisha_load_env();
     $diagnostics = [
         'php_version' => PHP_VERSION,
@@ -935,7 +1007,6 @@ if ((strpos($path, '/api/diagnostic') !== false || strpos($path, '/diagnostic') 
         'bootstrap_cache_writable' => is_writable(__DIR__ . '/../bootstrap/cache'),
         'app_key_exists' => !empty($env['APP_KEY'] ?? ''),
         'db_configured' => !empty($env['DB_DATABASE'] ?? ''),
-        'openai_key_in_env' => !empty($env['OPENAI_API_KEY'] ?? ''),
         'curl_available' => function_exists('curl_init'),
         'openssl_available' => function_exists('openssl_encrypt'),
     ];
@@ -951,7 +1022,7 @@ if ((strpos($path, '/api/diagnostic') !== false || strpos($path, '/diagnostic') 
             $diagnostics['registered_sites'] = (int)($result['count'] ?? 0);
         } catch (PDOException $e) {
             $diagnostics['sites_table_exists'] = false;
-            $diagnostics['sites_table_error'] = $e->getMessage();
+            $diagnostics['sites_table_error'] = true;
         }
     }
     
@@ -968,10 +1039,12 @@ $allowed_paths = [
     '/health',
     '/diagnostic',
     '/api/register',
+    '/api/reconnect',
     '/api/config', // ✅ Allow config endpoint for updating site configuration
     '/api/config/update',
     '/api/chat',
     '/api/query', // ✅ Allow query endpoint for chatbot queries
+    '/api/specification/ingest', // ✅ Allow NL specification upload indexing from WP plugin
     '/api/regenerate-key', // ✅ Allow API key regeneration
     '/api/site/info', // ✅ Allow site info endpoint
 ];
@@ -1002,48 +1075,6 @@ use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request;
 
 define('LARAVEL_START', microtime(true));
-
-// Simple test endpoint before Laravel loads (for debugging)
-if (isset($_GET['test']) && $_GET['test'] === 'simple') {
-    // Clean output buffer
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-    header('Content-Type: application/json');
-    
-    $env_file = __DIR__.'/../.env';
-    $env_data = [];
-    if (file_exists($env_file)) {
-        $lines = file($env_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line) || strpos($line, '#') === 0) continue;
-            if (strpos($line, '=') !== false) {
-                list($key, $value) = explode('=', $line, 2);
-                $key = trim($key);
-                $value = trim($value);
-                $value = trim($value, '"\'');
-                if (in_array($key, ['DB_HOST', 'DB_DATABASE', 'DB_USERNAME', 'APP_KEY'])) {
-                    $env_data[$key] = $key === 'DB_PASSWORD' ? '***hidden***' : (strlen($value) > 50 ? substr($value, 0, 20) . '...' : $value);
-                }
-            }
-        }
-    }
-    
-    echo json_encode([
-        'success' => true,
-        'message' => 'Simple test endpoint works!',
-        'php_version' => PHP_VERSION,
-        'vendor_exists' => file_exists(__DIR__.'/../vendor/autoload.php'),
-        'env_exists' => file_exists($env_file),
-        'env_data' => $env_data,
-        'storage_writable' => is_writable(__DIR__.'/../storage'),
-        'bootstrap_cache_writable' => is_writable(__DIR__.'/../bootstrap/cache'),
-        'document_root' => $_SERVER['DOCUMENT_ROOT'] ?? 'unknown',
-        'script_path' => __FILE__,
-    ], JSON_PRETTY_PRINT);
-    exit;
-}
 
 /*
 |--------------------------------------------------------------------------
@@ -1147,7 +1178,6 @@ if (!file_exists($env_file)) {
         $minimal_env .= "DB_DATABASE=\n";
         $minimal_env .= "DB_USERNAME=\n";
         $minimal_env .= "DB_PASSWORD=\n\n";
-        $minimal_env .= "OPENAI_API_KEY=\n";
         @file_put_contents($env_file, $minimal_env);
     }
 }

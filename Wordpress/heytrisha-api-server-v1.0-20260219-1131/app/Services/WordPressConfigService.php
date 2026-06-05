@@ -208,13 +208,14 @@ class WordPressConfigService
     }
 
     /**
-     * ✅ Fallback to .env if WordPress fetch fails
+     * Fallback when WordPress config cannot be loaded (DB credentials, REST URLs, etc.).
+     * OpenAI is never read from .env — each merchant supplies a key via the plugin or /api/config.
      */
     private function getFallbackConfig()
     {
         Log::warning("⚠️ Using fallback .env config");
         return [
-            'openai_api_key' => env('OPENAI_API_KEY', ''),
+            'openai_api_key' => '',
             'database' => [
                 'host' => env('DB_HOST', '127.0.0.1'),
                 'port' => env('DB_PORT', '3306'),
@@ -235,7 +236,8 @@ class WordPressConfigService
     }
 
     /**
-     * ✅ Get OpenAI API Key
+     * OpenAI key from WordPress-injected headers only (when present in config cache).
+     * HeyTrisha does not use a server-wide OpenAI key from the environment.
      */
     public function getOpenAIApiKey()
     {

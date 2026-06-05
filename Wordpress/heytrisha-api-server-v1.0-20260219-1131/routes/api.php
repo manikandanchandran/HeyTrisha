@@ -2,10 +2,10 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\WordPressApiController;
 use App\Http\Controllers\NLPController;
 use App\Http\Controllers\SiteController;
 use App\Http\Controllers\QueryController;
+use App\Http\Controllers\SpecificationController;
 use App\Http\Middleware\ApiKeyMiddleware;
 
 /*
@@ -27,46 +27,24 @@ Route::get('/health', function () {
         $info = [
             'status' => 'ok',
             'timestamp' => date('c'),
-            'laravel_version' => app()->version(),
-            'php_version' => PHP_VERSION,
             'server_time' => date('Y-m-d H:i:s'),
         ];
-        
-        // Try to check APP_KEY
-        try {
-            $appKey = env('APP_KEY', '');
-            $info['app_key_set'] = !empty($appKey);
-        } catch (\Exception $e) {
-            $info['app_key_set'] = false;
-        }
-        
-        // Check storage
-        try {
-            $info['storage_writable'] = is_writable(storage_path());
-        } catch (\Exception $e) {
-            $info['storage_writable'] = false;
-        }
-        
-        // Check database connection
-        try {
-            \DB::connection()->getPdo();
-            $info['database_connected'] = true;
-        } catch (\Exception $e) {
-            $info['database_connected'] = false;
-        }
-        
+
         return response()->json($info, 200);
     } catch (\Exception $e) {
         return response()->json([
             'status' => 'error',
-            'message' => $e->getMessage(),
-            'php_version' => PHP_VERSION
+            'message' => 'Health check failed.'
         ], 500);
     }
 });
 
 // Diagnostic endpoint
 Route::get('/diagnostic', function () {
+    if (!app()->environment('local')) {
+        abort(404);
+    }
+
     try {
         $diagnostics = [
             'php_version' => PHP_VERSION,
@@ -82,9 +60,8 @@ Route::get('/diagnostic', function () {
         try {
             $appKey = env('APP_KEY', '');
             $diagnostics['app_key_exists'] = !empty($appKey);
-            $diagnostics['app_key_length'] = strlen($appKey);
         } catch (\Exception $e) {
-            $diagnostics['app_key_error'] = $e->getMessage();
+            $diagnostics['app_key_error'] = true;
         }
         
         // Check database
@@ -94,16 +71,14 @@ Route::get('/diagnostic', function () {
             $diagnostics['sites_table_exists'] = \Schema::hasTable('sites');
         } catch (\Exception $e) {
             $diagnostics['database_connected'] = false;
-            $diagnostics['database_error'] = $e->getMessage();
+            $diagnostics['database_error'] = true;
         }
         
         return response()->json($diagnostics, 200);
     } catch (\Exception $e) {
         return response()->json([
             'status' => 'error',
-            'message' => $e->getMessage(),
-            'file' => $e->getFile(),
-            'line' => $e->getLine()
+            'message' => 'Diagnostic failed.'
         ], 500);
     }
 });
@@ -121,6 +96,9 @@ Route::middleware('auth:sanctum')->group(function () {
 Route::middleware(ApiKeyMiddleware::class)->group(function () {
     // Query processing (NEW SECURE VERSION - calls WordPress REST API)
     Route::post('/query', [QueryController::class, 'process']);
+
+    // Specification ingestion — accepts NL / structured text, extracts allowlist + embeds chunks
+    Route::post('/specification/ingest', [SpecificationController::class, 'ingest']);
     
     // Legacy query endpoint (OLD VERSION - direct database access)
     // Keep this for backward compatibility but mark as deprecated

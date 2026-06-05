@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Config;
 use App\Services\WordPressConfigService;
+use App\Support\ChatErrorMessages;
+use App\Support\SqlReadOnlyValidator;
 
 class MySQLService
 {
@@ -399,32 +401,11 @@ class MySQLService
                 return ["error" => "Generated SQL query is invalid"];
             }
 
-            // ✅ Security: Only allow SELECT queries (no INSERT, UPDATE, DELETE, DROP, etc.)
-            // Remove SQL comments and whitespace to check for SELECT
-            $sqlClean = preg_replace('/--.*$/m', '', $sqlQuery); // Remove single-line comments
-            $sqlClean = preg_replace('/\/\*.*?\*\//s', '', $sqlClean); // Remove multi-line comments
-            $sqlClean = trim($sqlClean);
-            
-            // Log original and cleaned SQL for debugging
-            Log::info("🔍 SQL Validation - Original: " . substr($sqlQuery, 0, 200));
-            Log::info("🔍 SQL Validation - Cleaned: " . substr($sqlClean, 0, 200));
-            
-            // Check if query contains SELECT (case-insensitive, allowing for WITH clauses, etc.)
-            // Must contain SELECT and NOT contain dangerous keywords
-            $hasSelect = preg_match('/\bSELECT\b/i', $sqlClean);
-            $hasDangerous = preg_match('/\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|EXEC|EXECUTE)\b/i', $sqlClean);
-            
-            Log::info("🔍 SQL Validation - Has SELECT: " . ($hasSelect ? 'YES' : 'NO') . " | Has Dangerous: " . ($hasDangerous ? 'YES' : 'NO'));
-            
-            if (!$hasSelect) {
-                Log::error("❌ Non-SELECT query detected. Original SQL: " . $sqlQuery);
-                Log::error("❌ Cleaned SQL: " . $sqlClean);
-                return ["error" => "I'm having trouble understanding your request. Could you please try rephrasing your question? For example, try asking 'How many orders were placed last month?' or 'What are the top selling products?'"];
-            }
-            
-            if ($hasDangerous) {
-                Log::error("❌ Dangerous query detected: " . $sqlQuery);
-                return ["error" => "I can only help with data analytics and insights. I cannot modify, delete, or alter any data in your database. Please ask me questions about viewing or analyzing your data instead."];
+            // ✅ Security: read-only SQL only (no INSERT, UPDATE, DELETE, DROP, etc.)
+            $validation = SqlReadOnlyValidator::validate($sqlQuery);
+            if (!$validation['valid']) {
+                Log::error('❌ Read-only SQL validation failed: ' . ($validation['error'] ?? '') . ' | SQL: ' . substr($sqlQuery, 0, 200));
+                return ['error' => ChatErrorMessages::fromSqlValidation($validation)];
             }
 
             Log::info("💾 Executing SQL Query: " . $sqlQuery);
@@ -437,6 +418,14 @@ class MySQLService
             if (empty($result)) {
                 Log::info("ℹ️ Query executed successfully but returned no results");
                 Log::info("ℹ️ SQL Query that returned no results: " . $sqlQuery);
+
+                $emptyHints = [
+                    'table_row_count'   => null,
+                    'has_where'         => (bool) preg_match('/\bWHERE\b/i', $sqlQuery),
+                    'has_date_filter'   => (bool) preg_match('/\b(date|created|modified|_date|between|curdate|now\s*\()\b/i', $sqlQuery),
+                    'has_status_filter' => (bool) preg_match('/\bstatus\b/i', $sqlQuery),
+                    'has_like_filter'   => (bool) preg_match('/\bLIKE\b/i', $sqlQuery),
+                ];
                 
                 // ✅ For debugging: Check if the table exists and has data
                 try {
@@ -468,7 +457,8 @@ class MySQLService
                             try {
                                 $rowCount = DB::select("SELECT COUNT(*) as count FROM `{$tableName}`");
                                 if (!empty($rowCount)) {
-                                    $totalRows = $rowCount[0]->count;
+                                    $totalRows = (int) $rowCount[0]->count;
+                                    $emptyHints['table_row_count'] = $totalRows;
                                     Log::info("ℹ️ Table '{$tableName}' has " . $totalRows . " total rows");
                                     
                                     // If table has rows but query returned empty, check WHERE clause
@@ -497,7 +487,7 @@ class MySQLService
                     Log::warning("⚠️ Could not verify table existence: " . $e->getMessage());
                 }
                 
-                return ["message" => "No matching records found"];
+                return ['message' => ChatErrorMessages::emptyQueryResults('', $sqlQuery, $emptyHints)];
             }
             
             Log::info("✅ Query executed successfully, returned " . count($result) . " rows");
@@ -512,22 +502,8 @@ class MySQLService
             Log::error("❌ Failed SQL Query: " . $sqlQuery);
             Log::error("❌ Stack trace: " . $e->getTraceAsString());
             
-            // Provide more specific error messages based on error type
-            $userMessage = "I encountered an issue processing your request.";
-            
-            // Check for common SQL errors and provide helpful guidance
-            if (strpos($errorMsg, 'Table') !== false && strpos($errorMsg, "doesn't exist") !== false) {
-                $userMessage .= " The requested data table was not found. Please try rephrasing your question.";
-            } elseif (strpos($errorMsg, 'Unknown column') !== false) {
-                $userMessage .= " There was an issue with the data structure. Please try a different question.";
-            } elseif (strpos($errorMsg, 'syntax error') !== false || strpos($errorMsg, 'SQL syntax') !== false) {
-                $userMessage .= " There was a syntax error in the generated query. Please try rephrasing your question.";
-            } elseif (strpos($errorMsg, 'Connection') !== false || strpos($errorMsg, 'timeout') !== false) {
-                $userMessage .= " The database connection timed out. Please try again.";
-            } else {
-                $userMessage .= " Please try rephrasing your question or check your database connection settings.";
-            }
-            
+            $userMessage = ChatErrorMessages::fromDatabaseError($errorMsg);
+
             return [
                 "error" => $userMessage,
                 "raw_error" => $errorMsg,  // Store raw error for fallback logic
@@ -540,19 +516,8 @@ class MySQLService
             Log::error("❌ Stack trace: " . $e->getTraceAsString());
             Log::error("❌ Failed SQL Query: " . $sqlQuery);
             
-            // Provide more specific error messages
-            $userMessage = "I encountered an issue processing your request.";
-            
-            if (strpos($errorMsg, 'Connection') !== false || strpos($errorMsg, 'timeout') !== false) {
-                $userMessage .= " The database connection timed out. Please try again.";
-            } elseif (strpos($errorMsg, 'Table') !== false && strpos($errorMsg, "doesn't exist") !== false) {
-                $userMessage .= " The requested data table was not found. Please try rephrasing your question.";
-            } elseif (strpos($errorMsg, 'Unknown column') !== false) {
-                $userMessage .= " There was an issue with the data structure. Please try a different question.";
-            } else {
-                $userMessage .= " Please try rephrasing your question.";
-            }
-            
+            $userMessage = ChatErrorMessages::fromDatabaseError($errorMsg);
+
             return [
                 "error" => $userMessage,
                 "raw_error" => $errorMsg  // Store raw error for fallback logic

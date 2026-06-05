@@ -33,12 +33,19 @@
 
 namespace App\Services;
 
-use OpenAI\Laravel\Facades\OpenAI;
+use OpenAI;
 
 class OpenAiService
 {
-    public function generateWordPressRequest($userQuery, $schema)
+    /**
+     * @param string $openaiKey  The API key supplied by the WordPress plugin (never from .env).
+     */
+    public function generateWordPressRequest($userQuery, $schema, string $openaiKey)
 {
+    if (empty($openaiKey)) {
+        throw new \Exception('OpenAI API Key is not configured. Please set it in the HeyTrisha plugin settings and save.');
+    }
+
     // Generate the schema string
     $schemaStr = collect($schema)->map(function ($columns, $table) {
         return "Table: $table, Columns: " . implode(', ', $columns);
@@ -47,6 +54,11 @@ class OpenAiService
     // Construct the prompt
     $prompt = "
     You are an API assistant that helps generate WordPress REST API requests.
+    
+    SECURITY & PRIVACY RULES (ABSOLUTE):
+    - Never request, output, or expose passwords, API keys, secrets, tokens, session data, or payment instrument details.
+    - Do not generate requests that retrieve or update credentials or payment tokens.
+    - If the user asks for anything sensitive (passwords, API keys, saved cards), return a safe request that fetches only analytics/aggregates or return an endpoint that yields no sensitive data.
 
     WordPress Database Schema:
     $schemaStr
@@ -65,11 +77,11 @@ class OpenAiService
     ";
 
     try {
-        // Make the API request to OpenAI's chat model
-        $response = OpenAI::chat()->create([
+        // Make the API request to OpenAI's chat model using the plugin-supplied key
+        $response = OpenAI::client($openaiKey)->chat()->create([
             'model' => 'gpt-4',
             'messages' => [
-                ['role' => 'system', 'content' => 'You are an API assistant that outputs only valid JSON responses.'],
+                ['role' => 'system', 'content' => 'You output only valid JSON. Never expose secrets or payment data.'],
                 ['role' => 'user', 'content' => $prompt]
             ],
             'max_tokens' => 200,

@@ -3,7 +3,7 @@
  * Plugin Name: Hey Trisha
  * Plugin URI: https://heytrisha.com
  * Description: AI-powered chatbot using OpenAI GPT for WordPress and WooCommerce. Natural language queries, product management, and intelligent responses.
- * Version: 2.1.7
+ * Version: 2.2.0
  * Author: Manikandan Chandran
  * Author URI: https://manikandanchandran.com/
  * License: MIT
@@ -100,7 +100,7 @@ if ($heytrisha_is_rest_api_request) {
 
 // Define plugin constants (with defined() checks for safety during upgrades)
 if (!defined('HEYTRISHA_VERSION')) {
-    define('HEYTRISHA_VERSION', '2.1.7');
+    define('HEYTRISHA_VERSION', '2.2.0');
 }
 if (!defined('HEYTRISHA_PLUGIN_DIR')) {
     define('HEYTRISHA_PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -116,6 +116,31 @@ if (!defined('HEYTRISHA_MIN_PHP_VERSION')) {
 }
 if (!defined('HEYTRISHA_MIN_WP_VERSION')) {
     define('HEYTRISHA_MIN_WP_VERSION', '5.0');
+}
+
+if ( ! function_exists( 'heytrisha_asset_version' ) ) {
+    /**
+     * Cache-bust plugin assets reliably across environments.
+     * Dev/staging often has aggressive browser/CDN caching; using filemtime() ensures
+     * the URL version changes when a new plugin zip is uploaded.
+     *
+     * @param string     $relative_path   Path relative to plugin root.
+     * @param string|int $fallback_version Fallback version (e.g. plugin version).
+     * @return string|int
+     */
+    function heytrisha_asset_version( $relative_path, $fallback_version ) {
+        $relative_path = ltrim( (string) $relative_path, '/\\' );
+        $full_path     = HEYTRISHA_PLUGIN_DIR . str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $relative_path );
+
+        if ( is_string( $full_path ) && $full_path !== '' && file_exists( $full_path ) ) {
+            $mtime = @filemtime( $full_path );
+            if ( false !== $mtime ) {
+                return $mtime;
+            }
+        }
+
+        return $fallback_version;
+    }
 }
 
 
@@ -136,7 +161,7 @@ function heytrisha_enqueue_chatbot() {
     // ✅ Load Chatbot CSS (only if file exists)
     $chatbot_css = HEYTRISHA_PLUGIN_DIR . 'assets/css/chatbot.css';
     if (file_exists($chatbot_css)) {
-        wp_enqueue_style('heytrisha-chatbot-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chatbot.css', [], HEYTRISHA_VERSION);
+        wp_enqueue_style('heytrisha-chatbot-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chatbot.css', [], heytrisha_asset_version('assets/css/chatbot.css', HEYTRISHA_VERSION));
     }
     
     // ✅ Load Chatbot JavaScript with React support
@@ -156,7 +181,7 @@ function heytrisha_enqueue_chatbot() {
         }, 10, 2);
         
         // Load chatbot script in footer, but ensure React is loaded first
-        wp_enqueue_script('heytrisha-chatbot-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chatbot.js', ['jquery', 'react', 'react-dom'], HEYTRISHA_VERSION, true);
+        wp_enqueue_script('heytrisha-chatbot-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chatbot.js', ['jquery', 'react', 'react-dom'], heytrisha_asset_version('assets/js/chatbot.js', HEYTRISHA_VERSION), true);
         
         // ✅ Pass configuration to JavaScript (only if script was enqueued)
         $api_url = heytrisha_get_api_url();
@@ -164,17 +189,43 @@ function heytrisha_enqueue_chatbot() {
         
         wp_localize_script('heytrisha-chatbot-js', 'heytrishaConfig', [
             'pluginUrl' => HEYTRISHA_PLUGIN_URL,
-            'apiUrl' => admin_url('admin-ajax.php'), // ✅ Changed to admin-ajax.php for security
+            'apiUrl' => $api_url,
             'restUrl' => rest_url('heytrisha/v1/'), // Keep for chat history (not exposed in main queries)
             'isSharedHosting' => $is_shared_hosting,
             'nonce' => wp_create_nonce('heytrisha_chatbot'),
             'serverNonce' => wp_create_nonce('heytrisha_server_action'),
             'wpRestNonce' => wp_create_nonce('wp_rest'),
-            'ajaxurl' => admin_url('admin-ajax.php')
+            'ajaxurl' => admin_url('admin-ajax.php'),
+            'schemaRevision' => heytrisha_get_schema_revision(),
+            'schemaUpdatedMessage' => esc_html__( 'Database schema was updated. Your next message will use the new definition.', 'hey-trisha' ),
         ]);
     }
 }
 add_action('admin_enqueue_scripts', 'heytrisha_enqueue_chatbot');
+
+/**
+ * Ensure Dashicons are available on HeyTrisha admin screens (icons in settings, notices, toggles).
+ */
+function heytrisha_enqueue_dashicons_on_plugin_pages() {
+    if (!is_admin()) {
+        return;
+    }
+    // phpcs:disable WordPress.Security.NonceVerification.Recommended -- Read-only GET page slug.
+    $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+    // phpcs:enable WordPress.Security.NonceVerification.Recommended
+
+    $heytrisha_pages = array(
+        'heytrisha-new-chat',
+        'heytrisha-chats',
+        'heytrisha-archive',
+        'heytrisha-chatbot-settings',
+        'heytrisha-terms-and-conditions',
+    );
+    if (in_array($page, $heytrisha_pages, true)) {
+        wp_enqueue_style('dashicons');
+    }
+}
+add_action('admin_enqueue_scripts', 'heytrisha_enqueue_dashicons_on_plugin_pages', 5);
 
 // ✅ Note: Terms and Conditions are now handled via dedicated admin page after activation
 // No modal JavaScript needed - user is redirected to Terms page after activation
@@ -378,17 +429,41 @@ function heytrisha_hide_admin_notices_on_chat_pages() {
         return;
     }
 
-    // Output minimal CSS to hide notices in the content area only
+    // Output minimal CSS to hide notices in the content area only.
+    // Use descendants (not only direct children): WooCommerce and other plugins
+    // often wrap notices or inject them inside .wrap, so child selectors miss them.
     echo '<style id="heytrisha-hide-admin-notices">
-        #wpbody-content > .notice,
-        #wpbody-content > .error,
-        #wpbody-content > .updated,
-        #wpbody-content > .update-nag {
+        #wpbody-content .notice,
+        #wpbody-content .error,
+        #wpbody-content .updated,
+        #wpbody-content .update-nag,
+        #wpbody-content .woocommerce-message,
+        #wpbody-content .woocommerce-store-notice,
+        #wpbody-content .woocommerce-error,
+        #wpbody-content .woocommerce-info,
+        #wpbody-content .wc-block-components-notice-banner {
             display: none !important;
         }
     </style>';
 }
 add_action('admin_head', 'heytrisha_hide_admin_notices_on_chat_pages', 100);
+
+/**
+ * Body class for New Chat screen so chat-admin.css can drop extra wp-admin bottom padding.
+ */
+function heytrisha_admin_new_chat_body_class($classes) {
+    if (!is_admin()) {
+        return $classes;
+    }
+    // phpcs:disable WordPress.Security.NonceVerification.Recommended -- Read-only page slug for display CSS
+    $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+    // phpcs:enable WordPress.Security.NonceVerification.Recommended
+    if ($page === 'heytrisha-new-chat') {
+        $classes .= ' heytrisha-admin-page-new-chat';
+    }
+    return $classes;
+}
+add_filter('admin_body_class', 'heytrisha_admin_new_chat_body_class');
 
 // ✅ Check PHP version before loading plugin
 if (version_compare(PHP_VERSION, HEYTRISHA_MIN_PHP_VERSION, '<')) {
@@ -431,7 +506,12 @@ function heytrisha_wp_version_notice() {
 // ✅ Include required files with error handling
 $heytrisha_required_files = array(
     'includes/class-heytrisha-database.php',
-    'includes/class-heytrisha-secure-credentials.php' // ✅ Secure credentials manager
+    'includes/class-heytrisha-secure-credentials.php', // ✅ Secure credentials manager
+    'includes/class-heytrisha-sql-validator.php', // ✅ Read-only SQL validation
+    'includes/class-heytrisha-chat-errors.php', // ✅ User-facing chat error messages
+    'includes/class-heytrisha-schema-manager.php', // ✅ Schema upload and management
+    'includes/class-heytrisha-settings-ui.php', // ✅ Settings UI for schema
+    'includes/class-heytrisha-fuzzy-search.php', // ✅ Partial product/category matching
 );
 
 foreach ($heytrisha_required_files as $heytrisha_file) {
@@ -485,6 +565,7 @@ function heytrisha_activate_plugin() {
         
         // STEP 2: Create default options
         add_option('heytrisha_api_url', 'https://api.heytrisha.com', '', 'no');
+        add_option('heytrisha_hybrid_architecture', 0, '', 'no');
         
         // ✅ STEP 3: Create database tables for chat system
         // phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Production error tracking for table creation failures
@@ -673,9 +754,13 @@ function heytrisha_handle_settings_save() {
         // Only make API call if there's data to update
         if (!empty($update_data)) {
             $response = wp_remote_post(rtrim($api_url, '/') . '/api/config', array(
-                'headers' => array(
-                    'Authorization' => 'Bearer ' . $site_api_key,
-                    'Content-Type' => 'application/json',
+                'headers' => array_merge(
+                    array(
+                        'Authorization' => 'Bearer ' . $site_api_key,
+                    ),
+                    array(
+                        'Content-Type' => 'application/json',
+                    )
                 ),
                 'body' => wp_json_encode($update_data),
                 'timeout' => 30,
@@ -715,16 +800,15 @@ function heytrisha_render_settings_page() {
     settings_errors('heytrisha_settings');
 
     $onboarding_complete = get_option('heytrisha_onboarding_complete', false);
-    $api_url = get_option('heytrisha_api_url', 'https://api.heytrisha.com');
-    $api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
-
+    $api_url             = get_option('heytrisha_api_url', 'https://api.heytrisha.com');
+    $api_key             = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
     echo '<div class="wrap">';
     echo '<h1>HeyTrisha Chatbot Settings</h1>';
 
     // Show onboarding form if not completed
     if (!$onboarding_complete) {
         echo '<div class="notice notice-warning inline" style="margin: 15px 0; padding: 12px;">';
-        echo '<p><strong>⚠️ Onboarding Required:</strong> Please complete the registration form below to activate HeyTrisha.</p>';
+        echo '<p><span class="dashicons dashicons-warning" style="vertical-align:text-bottom;margin-right:6px;" aria-hidden="true"></span><strong>Onboarding Required:</strong> Please complete the registration form below to activate HeyTrisha.</p>';
         echo '</div>';
 
         echo '<form method="post" id="heytrisha-onboarding-form">';
@@ -778,7 +862,7 @@ function heytrisha_render_settings_page() {
         echo '</tbody></table>';
 
         echo '<div class="notice notice-info inline" style="margin: 15px 0; padding: 12px;">';
-        echo '<p><strong>ℹ️ External Service Notice:</strong></p>';
+        echo '<p><span class="dashicons dashicons-info" style="vertical-align:text-bottom;margin-right:6px;" aria-hidden="true"></span><strong>External Service Notice:</strong></p>';
         echo '<p>This plugin connects to an external service (HeyTrisha API) to process natural language queries. Your account information, database credentials, and OpenAI API key will be securely stored on our servers. User queries and limited schema metadata may be transmitted. No passwords or payment data are sent.</p>';
         echo '</div>';
 
@@ -802,7 +886,7 @@ function heytrisha_render_settings_page() {
 
         if ($just_registered && $new_api_key) {
             echo '<div class="notice notice-success inline" style="margin: 15px 0; padding: 12px;">';
-            echo '<p><strong>✅ Registration Successful!</strong> Your API key has been generated and saved. Please copy it below - it will not be shown again.</p>';
+            echo '<p><span class="dashicons dashicons-yes-alt" style="vertical-align:text-bottom;margin-right:6px;color:#00a32a;" aria-hidden="true"></span><strong>Registration Successful!</strong> The HeyTrisha API has created your account and <strong>automatically generated your site API key</strong>. It is saved in this plugin—copy it below if you need a backup; it will not be shown in full again after you leave this screen.</p>';
             echo '</div>';
         }
 
@@ -813,9 +897,13 @@ function heytrisha_render_settings_page() {
         if (!empty($site_api_key) && !empty($api_url)) {
             // Try /api/site/info endpoint (this is the correct endpoint)
             $response = wp_remote_get(rtrim($api_url, '/') . '/api/site/info', array(
-                'headers' => array(
-                    'Authorization' => 'Bearer ' . $site_api_key,
-                    'Content-Type' => 'application/json',
+                'headers' => array_merge(
+                    array(
+                        'Authorization' => 'Bearer ' . $site_api_key,
+                    ),
+                    array(
+                        'Content-Type' => 'application/json',
+                    )
                 ),
                 'timeout' => 30,
                 'sslverify' => true,
@@ -862,6 +950,8 @@ function heytrisha_render_settings_page() {
         $stored_db_username = get_option('heytrisha_db_user', '');
         $stored_db_password = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_DB_PASSWORD, 'heytrisha_db_password', '');
         $openai_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_key', '');
+        $has_openai_key = !empty($openai_key);
+        $has_db_password = !empty($stored_db_password);
         
         // Personal Data & Keys Section
         echo '<h2>Personal Data & Keys</h2>';
@@ -888,17 +978,17 @@ function heytrisha_render_settings_page() {
         echo '<tr><th scope="row"><label for="heytrisha_password">Password</label></th>';
         echo '<td><div style="position: relative; display: inline-block; width: 100%; max-width: 400px;">';
         echo '<input type="password" id="heytrisha_password" name="heytrisha_password" value="" class="regular-text" autocomplete="new-password" style="padding-right: 40px; width: 100%;" />';
-        echo '<span class="heytrisha-toggle-password" data-target="heytrisha_password" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666;">👁️</span>';
+        echo '<button type="button" class="heytrisha-toggle-password" data-target="heytrisha_password" aria-label="' . esc_attr__( 'Show password', 'hey-trisha' ) . '" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); cursor: pointer; padding: 6px; border: none; background: transparent; color: #646970; line-height: 1;"><span class="dashicons dashicons-visibility" aria-hidden="true"></span></button>';
         echo '</div>';
         echo '<p class="description">Leave blank to keep current password. Minimum 8 characters.</p></td></tr>';
         
         // OpenAI API Key (editable with eye icon)
         echo '<tr><th scope="row"><label for="heytrisha_openai_key">OpenAI API Key</label></th>';
         echo '<td><div style="position: relative; display: inline-block; width: 100%; max-width: 400px;">';
-        echo '<input type="password" id="heytrisha_openai_key" name="heytrisha_openai_key" value="' . esc_attr($openai_key) . '" class="regular-text" autocomplete="off" style="padding-right: 40px; width: 100%;" />';
-        echo '<span class="heytrisha-toggle-password" data-target="heytrisha_openai_key" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666;">👁️</span>';
+        echo '<input type="password" id="heytrisha_openai_key" name="heytrisha_openai_key" value="" class="regular-text" autocomplete="off" style="padding-right: 40px; width: 100%;" />';
+        echo '<button type="button" class="heytrisha-toggle-password" data-target="heytrisha_openai_key" aria-label="' . esc_attr__( 'Show password', 'hey-trisha' ) . '" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); cursor: pointer; padding: 6px; border: none; background: transparent; color: #646970; line-height: 1;"><span class="dashicons dashicons-visibility" aria-hidden="true"></span></button>';
         echo '</div>';
-        echo '<p class="description">Get your OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a></p></td></tr>';
+        echo '<p class="description">' . ($has_openai_key ? '<strong>Configured</strong>. ' : '') . 'Get your OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a>. Leave blank to keep current key.</p></td></tr>';
         
         echo '</tbody></table>';
         
@@ -918,10 +1008,10 @@ function heytrisha_render_settings_page() {
         // Database Password (editable with eye icon)
         echo '<tr><th scope="row"><label for="heytrisha_db_password">Database Password</label></th>';
         echo '<td><div style="position: relative; display: inline-block; width: 100%; max-width: 400px;">';
-        echo '<input type="password" id="heytrisha_db_password" name="heytrisha_db_password" value="' . esc_attr($stored_db_password) . '" class="regular-text" autocomplete="off" style="padding-right: 40px; width: 100%;" />';
-        echo '<span class="heytrisha-toggle-password" data-target="heytrisha_db_password" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666;">👁️</span>';
+        echo '<input type="password" id="heytrisha_db_password" name="heytrisha_db_password" value="" class="regular-text" autocomplete="off" style="padding-right: 40px; width: 100%;" />';
+        echo '<button type="button" class="heytrisha-toggle-password" data-target="heytrisha_db_password" aria-label="' . esc_attr__( 'Show password', 'hey-trisha' ) . '" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); cursor: pointer; padding: 6px; border: none; background: transparent; color: #646970; line-height: 1;"><span class="dashicons dashicons-visibility" aria-hidden="true"></span></button>';
         echo '</div>';
-        echo '<p class="description">Leave blank to keep current password.</p></td></tr>';
+        echo '<p class="description">' . ($has_db_password ? '<strong>Configured</strong>. ' : '') . 'Leave blank to keep current password.</p></td></tr>';
         
         echo '</tbody></table>';
         
@@ -936,30 +1026,35 @@ function heytrisha_render_settings_page() {
             echo '<button type="button" onclick="copyApiKey()" style="margin-left: 10px;" class="button">Copy API Key</button>';
             echo '<p class="description"><strong>Important:</strong> Copy this API key now. It will be hidden after you refresh the page.</p></td></tr>';
         } else {
-            // Show password field with eye icon (read-only)
-            echo '<td><div style="position: relative; display: inline-block; width: 100%; max-width: 400px;">';
-            echo '<input type="password" id="heytrisha_api_key" name="heytrisha_api_key" value="' . esc_attr($api_key) . '" class="regular-text" readonly style="background-color: #f0f0f0; cursor: not-allowed; padding-right: 40px; width: 100%;" autocomplete="off" />';
-            echo '<span class="heytrisha-toggle-password" data-target="heytrisha_api_key" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666;">👁️</span>';
-            echo '</div>';
-            echo '<p class="description">Your API key was generated during registration. This field is read-only. If you lost it, contact support.</p></td></tr>';
+            // Never render the stored API key into HTML after first reveal.
+            $masked = (!empty($api_key) && is_string($api_key) && strlen($api_key) >= 8)
+                ? str_repeat('*', max(0, strlen($api_key) - 4)) . substr($api_key, -4)
+                : (!empty($api_key) ? '********' : '');
+
+            echo '<td><input type="text" id="heytrisha_api_key" name="heytrisha_api_key" value="' . esc_attr($masked) . '" class="regular-text" readonly style="background-color: #f0f0f0; cursor: not-allowed;" autocomplete="off" />';
+            echo '<p class="description">For security, the full key is only shown once, right after account creation. The server always issues a key when you register or use <strong>Change API server</strong> and <strong>Apply changes</strong> on a new base URL.</p></td></tr>';
         }
         echo '</tbody></table>';
         
         // External API Configuration Section
         echo '<h2>External API Configuration</h2>';
-        echo '<p>Configure your API settings below.</p>';
+        echo '<p>' . esc_html__('Click', 'hey-trisha') . ' <strong>' . esc_html__('Change API server', 'hey-trisha') . '</strong> ' . esc_html__('to clear this site’s saved HeyTrisha data (account, API URL, OpenAI, database passwords, and site API key) from WordPress, then enter everything again and the new', 'hey-trisha') . ' <strong>API URL</strong>. ' . esc_html__('Click', 'hey-trisha') . ' <strong>' . esc_html__('Apply changes', 'hey-trisha') . '</strong> ' . esc_html__('to call', 'hey-trisha') . ' <code>POST /api/register</code> ' . esc_html__('on that server. Account password is not stored in the database.', 'hey-trisha') . '</p>';
         echo '<table class="form-table"><tbody>';
         echo '<tr><th scope="row"><label for="heytrisha_api_url">API URL</label></th>';
-        echo '<td><input type="url" id="heytrisha_api_url" name="heytrisha_api_url" value="' . esc_attr($api_url) . '" class="regular-text" placeholder="https://api.heytrisha.com" /></td></tr>';
+        echo '<td><div class="heytrisha-api-url-wrap" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;max-width:100%;">';
+        echo '<input type="url" id="heytrisha_api_url" name="heytrisha_api_url" value="' . esc_attr($api_url) . '" class="regular-text" placeholder="https://api.heytrisha.com" style="min-width:min(100%, 28em);flex:1;" />';
+        echo '<button type="button" class="button" id="heytrisha-change-api-server-btn" aria-label="' . esc_attr__('Clear all HeyTrisha connection data to register on a different server', 'hey-trisha') . '">' . esc_html__('Change API server', 'hey-trisha') . '</button>';
+        echo '</div>';
+        echo '<p class="description">' . esc_html__('Resets this site for a new API server. You will need to enter your email, name, username, password, OpenAI key, and database details again, then the new base URL, and apply.', 'hey-trisha') . '</p></td></tr>';
         echo '</tbody></table>';
 
         echo '<div class="notice notice-info inline" style="margin: 15px 0; padding: 12px;">';
-        echo '<p><strong>ℹ️ External Service Notice:</strong></p>';
+        echo '<p><span class="dashicons dashicons-info" style="vertical-align:text-bottom;margin-right:6px;" aria-hidden="true"></span><strong>External Service Notice:</strong></p>';
         echo '<p>This plugin connects to an external service (HeyTrisha API) to process natural language queries. User queries and limited schema metadata may be transmitted. No passwords or payment data are sent.</p>';
         echo '</div>';
 
         echo '<p class="submit">';
-        echo '<button type="button" id="heytrisha-save-personal-data-btn" class="button button-primary">Save Changes</button>';
+        echo '<button type="button" id="heytrisha-save-personal-data-btn" class="button button-primary">' . esc_html__('Apply changes', 'hey-trisha') . '</button>';
         echo '<span id="heytrisha-save-status" style="margin-left: 10px;"></span>';
         echo '</p>';
         echo '</form>';
@@ -979,23 +1074,32 @@ function heytrisha_render_settings_page() {
         .heytrisha-toggle-password:hover {
             color: #2271b1 !important;
         }
+        .heytrisha-toggle-password .dashicons {
+            width: 20px;
+            height: 20px;
+            font-size: 20px;
+        }
         </style>';
         echo '<script>
-        // Eye icon toggle functionality
+        // Password visibility toggle (Dashicons)
         document.addEventListener("DOMContentLoaded", function() {
             var toggleButtons = document.querySelectorAll(".heytrisha-toggle-password");
             toggleButtons.forEach(function(button) {
                 button.addEventListener("click", function() {
                     var targetId = this.getAttribute("data-target");
                     var input = document.getElementById(targetId);
-                    if (input) {
-                        if (input.type === "password") {
-                            input.type = "text";
-                            this.textContent = "🙈";
-                        } else {
-                            input.type = "password";
-                            this.textContent = "👁️";
-                        }
+                    var icon = this.querySelector(".dashicons");
+                    if (!input || !icon) return;
+                    if (input.type === "password") {
+                        input.type = "text";
+                        icon.classList.remove("dashicons-visibility");
+                        icon.classList.add("dashicons-hidden");
+                        this.setAttribute("aria-label", "Hide password");
+                    } else {
+                        input.type = "password";
+                        icon.classList.remove("dashicons-hidden");
+                        icon.classList.add("dashicons-visibility");
+                        this.setAttribute("aria-label", "Show password");
                     }
                 });
             });
@@ -1026,6 +1130,54 @@ function heytrisha_render_settings_page() {
                 nonce: "' . $ajax_nonce . '"
             };
             
+            var iconFail = "<span class=\"dashicons dashicons-dismiss\" style=\"vertical-align:middle;margin-right:4px;\" aria-hidden=\"true\"></span>";
+            var iconOk = "<span class=\"dashicons dashicons-yes\" style=\"vertical-align:middle;margin-right:4px;\" aria-hidden=\"true\"></span>";
+            var iconWarn = "<span class=\"dashicons dashicons-warning\" style=\"vertical-align:middle;margin-right:4px;\" aria-hidden=\"true\"></span>";
+
+            $("#heytrisha-change-api-server-btn").on("click", function() {
+                var $b = $(this);
+                $b.prop("disabled", true);
+                $("#heytrisha-save-status").html("");
+                $.ajax({
+                    url: heytrishaPersonalDataAjax.ajaxurl,
+                    type: "POST",
+                    data: {
+                        action: "heytrisha_reset_for_new_api_server",
+                        nonce: heytrishaPersonalDataAjax.nonce
+                    },
+                    dataType: "json"
+                })
+                .done(function(res) {
+                    if (!res || !res.success) {
+                        var m = (res && res.data && res.data.message) ? res.data.message : "Request failed";
+                        $("#heytrisha-save-status").html("<span style=\"color:#d63638;\">" + iconFail + m + "</span>");
+                        return;
+                    }
+                    $("#heytrisha_email").val("");
+                    $("#heytrisha_first_name").val("");
+                    $("#heytrisha_last_name").val("");
+                    $("#heytrisha_username").val("");
+                    $("#heytrisha_password").val("");
+                    $("#heytrisha_openai_key").val("");
+                    $("#heytrisha_db_name").val("");
+                    $("#heytrisha_db_username").val("");
+                    $("#heytrisha_db_password").val("");
+                    $("#heytrisha_api_url").val("").trigger("input");
+                    var $key = $("#heytrisha_api_key");
+                    if ($key.length) {
+                        $key.val("");
+                    }
+                    $("#heytrisha-save-status").html("<span style=\"color:#00a32a;\">" + iconOk + (res.data && res.data.message ? res.data.message : "Cleared.") + "</span>");
+                    $("#heytrisha_email").focus();
+                })
+                .fail(function() {
+                    $("#heytrisha-save-status").html("<span style=\"color:#d63638;\">" + iconFail + "Network or server error.</span>");
+                })
+                .always(function() {
+                    $b.prop("disabled", false);
+                });
+            });
+            
             $("#heytrisha-save-personal-data-btn").on("click", function(e) {
                 e.preventDefault();
                 
@@ -1034,7 +1186,7 @@ function heytrisha_render_settings_page() {
                 var originalText = $btn.text();
                 
                 // Disable button and show loading
-                $btn.prop("disabled", true).text("Saving...");
+                $btn.prop("disabled", true).text("Applying…");
                 $status.html("").removeClass("notice notice-success notice-error");
                 
                 // Collect form data
@@ -1049,7 +1201,8 @@ function heytrisha_render_settings_page() {
                     openai_key: $("#heytrisha_openai_key").val() || "",
                     db_name: $("#heytrisha_db_name").val() || "",
                     db_username: $("#heytrisha_db_username").val() || "",
-                    db_password: $("#heytrisha_db_password").val() || ""
+                    db_password: $("#heytrisha_db_password").val() || "",
+                    api_url: $("#heytrisha_api_url").val() || ""
                 };
                 
                 // Make AJAX request
@@ -1060,7 +1213,12 @@ function heytrisha_render_settings_page() {
                     dataType: "json",
                     success: function(response) {
                         if (response.success) {
-                            $status.html("<span style=\"color: #00a32a;\">✓ " + response.data.message + "</span>");
+                            if (response.data && response.data.reregistered && response.data.redirect) {
+                                $status.html("<span style=\"color: #00a32a;\">" + iconOk + (response.data.message || "") + "</span>");
+                                window.location.href = response.data.redirect;
+                                return;
+                            }
+                            $status.html("<span style=\"color: #00a32a;\">" + iconOk + response.data.message + "</span>");
                             
                             // Clear password field if update was successful
                             if (formData.password) {
@@ -1076,16 +1234,16 @@ function heytrisha_render_settings_page() {
                             if (response.data && response.data.errors) {
                                 errorMsg += "<br>" + response.data.errors.join("<br>");
                             }
-                            $status.html("<span style=\"color: #d63638;\">✗ " + errorMsg + "</span>");
+                            $status.html("<span style=\"color: #d63638;\">" + iconFail + errorMsg + "</span>");
                             
                             // If local save succeeded but API sync failed, show warning
                             if (response.data && response.data.local_save) {
-                                $status.html("<span style=\"color: #d63638;\">⚠ " + errorMsg + "</span>");
+                                $status.html("<span style=\"color: #d63638;\">" + iconWarn + errorMsg + "</span>");
                             }
                         }
                     },
                     error: function(xhr, status, error) {
-                        $status.html("<span style=\"color: #d63638;\">✗ Error: " + error + "</span>");
+                        $status.html("<span style=\"color: #d63638;\">" + iconFail + "Error: " + error + "</span>");
                     },
                     complete: function() {
                         $btn.prop("disabled", false).text(originalText);
@@ -1094,6 +1252,11 @@ function heytrisha_render_settings_page() {
             });
         });
         </script>';
+    }
+    
+    // ✅ Render Schema Upload Section
+    if (class_exists('HeyTrisha_Settings_UI')) {
+        HeyTrisha_Settings_UI::render_schema_section();
     }
     
     echo '</div>';
@@ -1122,6 +1285,7 @@ function heytrisha_handle_onboarding_registration() {
     $openai_key = isset($_POST['heytrisha_openai_key']) ? sanitize_text_field(wp_unslash($_POST['heytrisha_openai_key'])) : '';
     $site_url = isset($_POST['heytrisha_site_url']) ? esc_url_raw(wp_unslash($_POST['heytrisha_site_url'])) : get_site_url();
     $api_server_url = isset($_POST['heytrisha_api_server_url']) ? esc_url_raw(wp_unslash($_POST['heytrisha_api_server_url'])) : 'https://api.heytrisha.com';
+    $register_url = rtrim($api_server_url, '/') . '/api/register';
 
     // Validate required fields
     if (empty($email)) {
@@ -1165,7 +1329,7 @@ function heytrisha_handle_onboarding_registration() {
     heytrisha_set_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, $openai_key);
 
     // Register with API server
-    $response = wp_remote_post(rtrim($api_server_url, '/') . '/api/register', array(
+    $response = wp_remote_post($register_url, array(
         'headers' => array(
             'Content-Type' => 'application/json',
         ),
@@ -1196,6 +1360,17 @@ function heytrisha_handle_onboarding_registration() {
     $response_code = wp_remote_retrieve_response_code($response);
     $body = wp_remote_retrieve_body($response);
     $data = json_decode($body, true);
+
+    $content_type = '';
+    if (is_array($response) && isset($response['headers'])) {
+        try {
+            // WP_Http_Headers is ArrayAccess.
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Avoids fatal if headers object isn't stringable
+            $content_type = isset($response['headers']['content-type']) ? (string) $response['headers']['content-type'] : '';
+        } catch (Throwable $e) {
+            $content_type = '';
+        }
+    }
 
     // Log response for debugging (only in development)
     // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Debug logging for API registration troubleshooting
@@ -1296,9 +1471,13 @@ function heytrisha_handle_settings_update() {
     $site_api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
     if (!empty($site_api_key)) {
         $response = wp_remote_post(rtrim($api_url, '/') . '/api/config', array(
-            'headers' => array(
-                'Authorization' => 'Bearer ' . $site_api_key,
-                'Content-Type' => 'application/json',
+            'headers' => array_merge(
+                array(
+                    'Authorization' => 'Bearer ' . $site_api_key,
+                ),
+                array(
+                    'Content-Type' => 'application/json',
+                )
             ),
             'body' => wp_json_encode(array(
                 'openai_key' => $openai_key,
@@ -1375,7 +1554,7 @@ function heytrisha_render_terms_page() {
             
             <!-- Security Warning -->
             <div style="background: #fff3cd; border: 1px solid #ffc107; border-left: 4px solid #ffc107; padding: 20px; margin-bottom: 30px; border-radius: 4px;">
-                <strong style="color: #856404; display: block; margin-bottom: 10px; font-size: 16px;">⚠️ Important Security Notice:</strong>
+                <strong style="color: #856404; display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 16px;"><span class="dashicons dashicons-warning" style="font-size: 22px; width: 22px; height: 22px;" aria-hidden="true"></span> Important Security Notice:</strong>
                 <p style="color: #856404; margin: 10px 0; line-height: 1.6; font-size: 14px;">
                     This plugin requires database access to function properly. For your security and data protection, 
                     please use <strong>read-only database user credentials</strong> when configuring this plugin. 
@@ -1399,8 +1578,9 @@ function heytrisha_render_terms_page() {
                 </ul>
                 
                 <p style="margin-top: 30px;">
-                    <a href="https://heytrisha.com/terms-and-conditions" target="_blank" style="font-size: 14px; text-decoration: none;">
-                        Read full Terms and Conditions →
+                    <a href="https://heytrisha.com/terms-and-conditions" target="_blank" style="font-size: 14px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+                        Read full Terms and Conditions
+                        <span class="dashicons dashicons-arrow-right-alt2" style="font-size: 18px; width: 18px; height: 18px;" aria-hidden="true"></span>
                     </a>
                 </p>
             </div>
@@ -1503,12 +1683,12 @@ function heytrisha_render_new_chat_page() {
     // React removed - WordPress.org policy prohibits external CDN scripts
     $chat_admin_css = HEYTRISHA_PLUGIN_DIR . 'assets/css/chat-admin.css';
     if (file_exists($chat_admin_css)) {
-        wp_enqueue_style('heytrisha-chat-admin-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chat-admin.css', [], HEYTRISHA_VERSION);
+        wp_enqueue_style('heytrisha-chat-admin-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chat-admin.css', [], heytrisha_asset_version('assets/css/chat-admin.css', HEYTRISHA_VERSION));
     }
     
     $chat_admin_js = HEYTRISHA_PLUGIN_DIR . 'assets/js/chat-admin.js';
     if (file_exists($chat_admin_js)) {
-        wp_enqueue_script('heytrisha-chat-admin-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chat-admin.js', ['jquery', 'react', 'react-dom'], HEYTRISHA_VERSION, true);
+        wp_enqueue_script('heytrisha-chat-admin-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chat-admin.js', ['jquery', 'react', 'react-dom'], heytrisha_asset_version('assets/js/chat-admin.js', HEYTRISHA_VERSION), true);
         
         $plugin_url = HEYTRISHA_PLUGIN_URL;
         
@@ -1518,7 +1698,8 @@ function heytrisha_render_new_chat_page() {
             'chatId' => $chat_id,
             'restUrl' => rest_url('heytrisha/v1/'), // Keep for chat management (chats, messages)
             'nonce' => wp_create_nonce('wp_rest'),
-            'chatbotNonce' => wp_create_nonce('heytrisha_chatbot') // ✅ Nonce for admin-ajax.php AJAX queries
+            'chatbotNonce' => wp_create_nonce('heytrisha_chatbot'), // ✅ Nonce for admin-ajax.php AJAX queries
+            'hybridArchitecture' => ( (int) get_option( 'heytrisha_hybrid_architecture', 0 ) === 1 ),
         ]);
     }
     
@@ -1534,8 +1715,8 @@ function heytrisha_render_chats_page() {
         return;
     }
     
-    wp_enqueue_style('heytrisha-chats-list-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chats-list.css', [], HEYTRISHA_VERSION);
-    wp_enqueue_script('heytrisha-chats-list-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chats-list.js', ['jquery', 'react', 'react-dom'], HEYTRISHA_VERSION, true);
+    wp_enqueue_style('heytrisha-chats-list-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chats-list.css', [], heytrisha_asset_version('assets/css/chats-list.css', HEYTRISHA_VERSION));
+    wp_enqueue_script('heytrisha-chats-list-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chats-list.js', ['jquery', 'react', 'react-dom'], heytrisha_asset_version('assets/js/chats-list.js', HEYTRISHA_VERSION), true);
     
     wp_localize_script('heytrisha-chats-list-js', 'heytrishaChatsConfig', [
         'restUrl' => rest_url('heytrisha/v1/'),
@@ -1555,8 +1736,8 @@ function heytrisha_render_archive_page() {
         return;
     }
     
-    wp_enqueue_style('heytrisha-chats-list-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chats-list.css', [], HEYTRISHA_VERSION);
-    wp_enqueue_script('heytrisha-chats-list-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chats-list.js', ['jquery', 'react', 'react-dom'], HEYTRISHA_VERSION, true);
+    wp_enqueue_style('heytrisha-chats-list-css', HEYTRISHA_PLUGIN_URL . 'assets/css/chats-list.css', [], heytrisha_asset_version('assets/css/chats-list.css', HEYTRISHA_VERSION));
+    wp_enqueue_script('heytrisha-chats-list-js', HEYTRISHA_PLUGIN_URL . 'assets/js/chats-list.js', ['jquery', 'react', 'react-dom'], heytrisha_asset_version('assets/js/chats-list.js', HEYTRISHA_VERSION), true);
     
     wp_localize_script('heytrisha-chats-list-js', 'heytrishaChatsConfig', [
         'restUrl' => rest_url('heytrisha/v1/'),
@@ -1574,6 +1755,46 @@ function heytrisha_render_archive_page() {
 // ✅ Get external API URL from settings
 function heytrisha_get_api_url() {
     return get_option('heytrisha_api_url', 'https://api.heytrisha.com');
+}
+
+/**
+ * Register this site with a HeyTrisha API server (POST /api/register).
+ *
+ * @param string $api_server_url Base API URL.
+ * @param array  $body           Registration body (site_url, openai_key, email, etc.).
+ * @return string|WP_Error New site API key (ht_…), or error.
+ */
+function heytrisha_api_register_request($api_server_url, $body) {
+    $register_url = rtrim((string) $api_server_url, '/') . '/api/register';
+    $response = wp_remote_post(
+        $register_url,
+        array(
+            'headers' => array('Content-Type' => 'application/json'),
+            'body' => wp_json_encode($body),
+            'timeout' => 30,
+            'sslverify' => true,
+        )
+    );
+
+    if (is_wp_error($response)) {
+        return $response;
+    }
+
+    $response_code = wp_remote_retrieve_response_code($response);
+    $raw = wp_remote_retrieve_body($response);
+    $data = json_decode($raw, true);
+
+    if ($response_code < 200 || $response_code >= 300) {
+        $msg = (is_array($data) && isset($data['message'])) ? (string) $data['message'] : 'HTTP ' . (string) $response_code;
+        return new WP_Error('heytrisha_register_http', $msg);
+    }
+
+    if (!is_array($data) || empty($data['success']) || empty($data['api_key'])) {
+        $msg = (is_array($data) && isset($data['message'])) ? (string) $data['message'] : 'Invalid response from API server';
+        return new WP_Error('heytrisha_register_response', $msg);
+    }
+
+    return (string) $data['api_key'];
 }
 
 /**
@@ -1600,6 +1821,172 @@ function heytrisha_sanitize_confirmation_data($data) {
 }
 
 /**
+ * Normalize a table name or user phrase for fuzzy matching (spaces/hyphens → underscores).
+ *
+ * @param string $name Table name or phrase.
+ * @return string
+ */
+function heytrisha_normalize_table_slug( $name ) {
+	$name = strtolower( trim( (string) $name ) );
+	$name = preg_replace( '/[\s\-]+/', '_', $name );
+	$name = preg_replace( '/[^a-z0-9_]/', '', $name );
+
+	return $name;
+}
+
+/**
+ * Table suffixes that must never be queried (credentials, sessions, payment data).
+ *
+ * @return string[]
+ */
+function heytrisha_get_blocked_table_suffixes() {
+	return array(
+		'users',
+		'usermeta',
+		'options',
+		'woocommerce_payment_tokens',
+		'woocommerce_payment_tokenmeta',
+		'woocommerce_api_keys',
+		'woocommerce_sessions',
+	);
+}
+
+/**
+ * Whether a physical table name is blocked for analytics queries.
+ *
+ * @param string $full_table_name Actual MySQL table name.
+ * @return bool
+ */
+function heytrisha_is_blocked_table_name( $full_table_name ) {
+	$full = (string) $full_table_name;
+	if ( $full === '' ) {
+		return true;
+	}
+
+	global $wpdb;
+	$prefix = $wpdb->prefix;
+	$suffix = ( strpos( $full, $prefix ) === 0 ) ? substr( $full, strlen( $prefix ) ) : $full;
+	$slug   = heytrisha_normalize_table_slug( $suffix );
+
+	return in_array( $slug, heytrisha_get_blocked_table_suffixes(), true );
+}
+
+/**
+ * Index of all non-blocked tables in the WordPress database connection.
+ *
+ * @return array{existing_full: array<string,string>, slug_map: array<string,array<int,string>>}
+ */
+function heytrisha_build_database_table_index() {
+	global $wpdb;
+
+	$existing_full = array();
+	$slug_map      = array();
+
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	$rows = $wpdb->get_results( 'SHOW TABLES', ARRAY_N );
+
+	foreach ( (array) $rows as $row ) {
+		$full = $row[0] ?? '';
+		if ( ! is_string( $full ) || $full === '' || heytrisha_is_blocked_table_name( $full ) ) {
+			continue;
+		}
+
+		$existing_full[ strtolower( $full ) ] = $full;
+
+		$slugs = array( heytrisha_normalize_table_slug( $full ) );
+		if ( strpos( $full, $wpdb->prefix ) === 0 ) {
+			$suffix = substr( $full, strlen( $wpdb->prefix ) );
+			if ( $suffix !== '' ) {
+				$slugs[] = heytrisha_normalize_table_slug( $suffix );
+			}
+		}
+
+		foreach ( array_unique( $slugs ) as $slug ) {
+			if ( $slug === '' ) {
+				continue;
+			}
+			$slug_map[ $slug ][] = $full;
+		}
+	}
+
+	return array(
+		'existing_full' => $existing_full,
+		'slug_map'      => $slug_map,
+	);
+}
+
+/**
+ * Find database tables whose names appear in a natural-language question.
+ *
+ * Matches "test table" to wp_test_table, test_table, etc.
+ *
+ * @param string $query User question.
+ * @return string[] Full MySQL table names.
+ */
+function heytrisha_find_tables_matching_query( $query ) {
+	if ( ! is_string( $query ) || trim( $query ) === '' ) {
+		return array();
+	}
+
+	$index     = heytrisha_build_database_table_index();
+	$slug_map  = $index['slug_map'];
+	$query_l   = strtolower( $query );
+	$query_slug = preg_replace( '/[\s\-]+/', '_', $query_l );
+
+	$matched = array();
+
+	foreach ( $slug_map as $slug => $candidates ) {
+		if ( strlen( $slug ) < 3 ) {
+			continue;
+		}
+
+		$phrase_spaces = str_replace( '_', ' ', $slug );
+		$found         = ( strpos( $query_slug, $slug ) !== false )
+			|| ( strpos( $query_l, $phrase_spaces ) !== false );
+
+		if ( ! $found && preg_match( '/\b' . preg_quote( $slug, '/' ) . '\b/', $query_slug ) ) {
+			$found = true;
+		}
+
+		if ( $found ) {
+			foreach ( $candidates as $full ) {
+				$matched[ $full ] = true;
+			}
+		}
+	}
+
+	return array_keys( $matched );
+}
+
+/**
+ * Add tables referenced in the user question to a compact schema (if they exist in DB).
+ *
+ * @param array  $schema Compact schema table => [columns].
+ * @param string $query  User question.
+ * @return array<string,array<int,string>>
+ */
+function heytrisha_augment_schema_with_query_tables( array $schema, $query ) {
+	$tables = heytrisha_find_tables_matching_query( $query );
+
+	foreach ( $tables as $full ) {
+		if ( isset( $schema[ $full ] ) ) {
+			continue;
+		}
+		$cols = heytrisha_get_table_column_names_live( $full );
+		if ( ! empty( $cols ) ) {
+			$schema[ $full ] = $cols;
+		}
+	}
+
+	if ( ! empty( $tables ) ) {
+		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		error_log( 'Hey Trisha: Query-matched custom tables: ' . implode( ', ', $tables ) );
+	}
+
+	return $schema;
+}
+
+/**
  * Get database schema for API
  * Returns compact schema format: table_name => [column1, column2, ...]
  * 
@@ -1615,9 +2002,9 @@ function heytrisha_get_database_schema() {
     // This keeps the prompt size manageable and improves AI accuracy
     $relevant_suffixes = array(
         // WordPress core tables
-        'posts', 'postmeta', 'users', 'usermeta',
+        'posts', 'postmeta',
         'terms', 'termmeta', 'term_taxonomy', 'term_relationships',
-        'options', 'comments', 'commentmeta', 'links',
+        'comments', 'commentmeta', 'links',
         // WooCommerce HPOS (High-Performance Order Storage) tables
         'wc_orders', 'wc_orders_meta', 'wc_order_operational_data',
         'wc_order_addresses', 'wc_order_stats',
@@ -1633,8 +2020,6 @@ function heytrisha_get_database_schema() {
         'woocommerce_tax_rates', 'woocommerce_tax_rate_locations',
         'woocommerce_shipping_zones', 'woocommerce_shipping_zone_methods',
         'woocommerce_shipping_zone_locations',
-        'woocommerce_payment_tokens', 'woocommerce_payment_tokenmeta',
-        'woocommerce_sessions', 'woocommerce_api_keys',
         'woocommerce_attribute_taxonomies',
         'woocommerce_downloadable_product_permissions',
         'woocommerce_log', 'woocommerce_termmeta',
@@ -1718,6 +2103,380 @@ function heytrisha_get_database_schema() {
         error_log('Hey Trisha: Error fetching database schema (Throwable) - ' . $e->getMessage());
         return array();
     }
+}
+
+/**
+ * Column names from an uploaded/parsed table definition (associative or list).
+ *
+ * @param array $columns Parsed column map or list.
+ * @return string[]
+ */
+function heytrisha_uploaded_schema_column_names( $columns ) {
+    if ( ! is_array( $columns ) ) {
+        return array();
+    }
+    $names = array();
+    foreach ( $columns as $k => $v ) {
+        if ( is_string( $k ) && ! is_numeric( $k ) ) {
+            $names[] = $k;
+        } elseif ( is_int( $k ) && is_string( $v ) ) {
+            $names[] = $v;
+        }
+    }
+    return $names;
+}
+
+/**
+ * SHOW COLUMNS for one table — returns Field names.
+ *
+ * @param string $full_table_name Actual DB table name.
+ * @return string[]
+ */
+function heytrisha_get_table_column_names_live( $full_table_name ) {
+    global $wpdb;
+
+    if ( ! is_string( $full_table_name ) || $full_table_name === '' ) {
+        return array();
+    }
+
+    $safe = str_replace( '`', '``', $full_table_name );
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+    $rows = $wpdb->get_results( "SHOW COLUMNS FROM `{$safe}`", ARRAY_A );
+
+    if ( empty( $rows ) || $wpdb->last_error ) {
+        return array();
+    }
+
+    $out = array();
+    foreach ( $rows as $row ) {
+        if ( ! empty( $row['Field'] ) ) {
+            $out[] = $row['Field'];
+        }
+    }
+    return $out;
+}
+
+/**
+ * Pick one physical table when multiple share the same suffix (rare).
+ *
+ * @param array $candidates List of full table names.
+ * @return string|null
+ */
+function heytrisha_disambiguate_table_candidates( array $candidates ) {
+    if ( empty( $candidates ) ) {
+        return null;
+    }
+    if ( count( $candidates ) === 1 ) {
+        return $candidates[0];
+    }
+    global $wpdb;
+    $pref = $wpdb->prefix;
+    foreach ( $candidates as $c ) {
+        if ( is_string( $c ) && strpos( $c, $pref ) === 0 ) {
+            return $c;
+        }
+    }
+    return $candidates[0];
+}
+
+/**
+ * Map an uploaded schema table key to an existing prefixed table on this site.
+ *
+ * @param string               $uploaded_key Key from uploaded JSON/SQL/text.
+ * @param string               $prefix        $wpdb->prefix.
+ * @param array<string,string> $existing_full lower_full => actual_full.
+ * @param array<string,array>  $suffix_map    lower_suffix => list of full names.
+ * @return string|null Actual table name.
+ */
+function heytrisha_match_uploaded_table_to_existing( $uploaded_key, $prefix, array $existing_full, array $suffix_map ) {
+    $k = trim( (string) $uploaded_key );
+    if ( $k === '' ) {
+        return null;
+    }
+
+    $lk = strtolower( $k );
+    if ( isset( $existing_full[ $lk ] ) ) {
+        return $existing_full[ $lk ];
+    }
+
+    $pref_l = strtolower( $prefix );
+    if ( strpos( $lk, $pref_l ) === 0 ) {
+        $suf = substr( $k, strlen( $prefix ) );
+        if ( $suf !== '' && isset( $suffix_map[ strtolower( $suf ) ] ) ) {
+            return heytrisha_disambiguate_table_candidates( $suffix_map[ strtolower( $suf ) ] );
+        }
+    }
+
+    $full_guess = $prefix . $k;
+    if ( isset( $existing_full[ strtolower( $full_guess ) ] ) ) {
+        return $existing_full[ strtolower( $full_guess ) ];
+    }
+
+    if ( isset( $suffix_map[ $lk ] ) ) {
+        return heytrisha_disambiguate_table_candidates( $suffix_map[ $lk ] );
+    }
+
+    $lk_slug = heytrisha_normalize_table_slug( $k );
+    if ( $lk_slug !== '' ) {
+        foreach ( $suffix_map as $suffix_key => $candidates ) {
+            if ( heytrisha_normalize_table_slug( $suffix_key ) === $lk_slug ) {
+                return heytrisha_disambiguate_table_candidates( $candidates );
+            }
+        }
+    }
+
+    $stripped = $k;
+    for ( $i = 0; $i < 6; $i++ ) {
+        $next = preg_replace( '/^wp\d*_/', '', $stripped, 1 );
+        if ( $next === $stripped ) {
+            $next = preg_replace( '/^wp_/', '', $stripped, 1 );
+        }
+        if ( $next === $stripped ) {
+            break;
+        }
+        $stripped = $next;
+        $ls = strtolower( $stripped );
+        if ( isset( $suffix_map[ $ls ] ) ) {
+            return heytrisha_disambiguate_table_candidates( $suffix_map[ $ls ] );
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Build effective compact schema from uploaded definition × real DB columns.
+ *
+ * @param array $uploaded Parsed schema (table => columns).
+ * @return array<string,array<int,string>>|array{_heytrisha_spec_error:string}
+ */
+function heytrisha_resolve_uploaded_schema_against_database( array $uploaded ) {
+    global $wpdb;
+
+    $prefix = $wpdb->prefix;
+
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+    $rows = $wpdb->get_results( 'SHOW TABLES', ARRAY_N );
+
+    $existing_full = array();
+    $suffix_map    = array();
+
+    foreach ( (array) $rows as $row ) {
+        $full = $row[0] ?? '';
+        if ( ! is_string( $full ) || $full === '' || heytrisha_is_blocked_table_name( $full ) ) {
+            continue;
+        }
+        $existing_full[ strtolower( $full ) ] = $full;
+        $suffix                               = ( strpos( $full, $prefix ) === 0 )
+            ? substr( $full, strlen( $prefix ) )
+            : $full;
+        $suffix_map[ strtolower( $suffix ) ][] = $full;
+        $slug_norm = heytrisha_normalize_table_slug( $suffix );
+        if ( $slug_norm !== strtolower( $suffix ) ) {
+            $suffix_map[ $slug_norm ][] = $full;
+        }
+    }
+
+    $effective = array();
+
+    foreach ( $uploaded as $uploaded_key => $uploaded_columns ) {
+        $matched = heytrisha_match_uploaded_table_to_existing( $uploaded_key, $prefix, $existing_full, $suffix_map );
+        if ( ! $matched ) {
+            continue;
+        }
+
+        $desired = heytrisha_uploaded_schema_column_names( $uploaded_columns );
+        $live    = heytrisha_get_table_column_names_live( $matched );
+
+        if ( empty( $live ) ) {
+            continue;
+        }
+
+        if ( empty( $desired ) ) {
+            $effective[ $matched ] = $live;
+            continue;
+        }
+
+        $allowed_lower = array_map( 'strtolower', $desired );
+        $filtered      = array();
+        foreach ( $live as $col ) {
+            if ( in_array( strtolower( $col ), $allowed_lower, true ) ) {
+                $filtered[] = $col;
+            }
+        }
+
+        if ( ! empty( $filtered ) ) {
+            $effective[ $matched ] = $filtered;
+        }
+    }
+
+    if ( empty( $effective ) ) {
+        return array(
+            '_heytrisha_spec_error' => 'Your uploaded schema does not match any tables in this site\'s database. Check table names (they must exist on this WordPress install, including the correct table prefix) and try again.',
+        );
+    }
+
+    return $effective;
+}
+
+/**
+ * Narrow a compact schema (full_table => [cols]) using API ingest allowlist.
+ *
+ * @param array $base_schema  full_table => list of column names.
+ * @param array $allowlist    table key => column list (from ingest).
+ * @return array<string,array<int,string>>
+ */
+function heytrisha_intersect_compact_schema_with_spec_allowlist( array $base_schema, array $allowlist ) {
+    global $wpdb;
+    $prefix = $wpdb->prefix;
+
+    $allowlist_by_suffix = array();
+    foreach ( $allowlist as $tbl_key => $col_list ) {
+        $suffix = ( strpos( (string) $tbl_key, $prefix ) === 0 )
+            ? substr( (string) $tbl_key, strlen( $prefix ) )
+            : (string) $tbl_key;
+
+        $allowlist_by_suffix[ heytrisha_normalize_table_slug( $suffix ) ] = array_map( 'strtolower', (array) $col_list );
+    }
+
+    $effective = array();
+    foreach ( $base_schema as $full_table => $live_columns ) {
+        $suffix = ( strpos( $full_table, $prefix ) === 0 )
+            ? substr( $full_table, strlen( $prefix ) )
+            : $full_table;
+
+        $suffix_l = heytrisha_normalize_table_slug( $suffix );
+        if ( ! array_key_exists( $suffix_l, $allowlist_by_suffix ) ) {
+            continue;
+        }
+
+        $allowed_cols = $allowlist_by_suffix[ $suffix_l ];
+
+        if ( in_array( '*', $allowed_cols, true ) ) {
+            $effective[ $full_table ] = $live_columns;
+            continue;
+        }
+
+        $filtered = array();
+        foreach ( $live_columns as $col ) {
+            if ( in_array( strtolower( $col ), $allowed_cols, true ) ) {
+                $filtered[] = $col;
+            }
+        }
+
+        if ( ! empty( $filtered ) ) {
+            $effective[ $full_table ] = $filtered;
+        }
+    }
+
+    return $effective;
+}
+
+/**
+ * Get the effective schema to send to the API for a given chat query.
+ *
+ * When structured schema is stored (uploaded JSON/SQL/text parse or generated snapshot),
+ * that definition is resolved against the real database so the AI only sees those
+ * tables and columns — even if API specification ingest failed or is inactive.
+ *
+ * When a specification file is also active and an allowlist was extracted from it,
+ * this function further intersects with that allowlist.
+ *
+ * Table-name matching uses suffix (the part after the WP prefix) so bare names
+ * like "wc_orders" still match "wp53_5_wc_orders".
+ *
+ * @param string $query Optional user question — tables mentioned in it are included in the schema.
+ * @return array|array{_heytrisha_spec_error:string}  Compact schema (table => [col,...]) or error.
+ */
+function heytrisha_get_effective_schema_for_api( $query = '' ) {
+    $schema_manager = HeyTrisha_Schema_Manager::get_instance();
+    $uploaded       = $schema_manager->get_schema();
+    $query          = is_string( $query ) ? $query : '';
+
+    if ( is_array( $uploaded ) && ! empty( $uploaded ) ) {
+        $resolved = heytrisha_resolve_uploaded_schema_against_database( $uploaded );
+        if ( isset( $resolved['_heytrisha_spec_error'] ) ) {
+            return $resolved;
+        }
+
+        if ( $schema_manager->is_specification_active() ) {
+            $allowlist = $schema_manager->get_spec_allowlist();
+            if ( ! empty( $allowlist ) ) {
+                $narrow = heytrisha_intersect_compact_schema_with_spec_allowlist( $resolved, $allowlist );
+                if ( empty( $narrow ) ) {
+                    return array(
+                        '_heytrisha_spec_error' => 'Your indexed specification does not overlap the tables in your uploaded schema. Update the specification or the schema file.',
+                    );
+                }
+                $resolved = $narrow;
+            }
+        }
+
+        if ( $query !== '' ) {
+            return heytrisha_augment_schema_with_query_tables( $resolved, $query );
+        }
+
+        return $resolved;
+    }
+
+    $live_schema = heytrisha_get_database_schema();
+
+    if ( ! $schema_manager->is_specification_active() ) {
+        if ( $query !== '' ) {
+            return heytrisha_augment_schema_with_query_tables( $live_schema, $query );
+        }
+        return $live_schema;
+    }
+
+    $allowlist = $schema_manager->get_spec_allowlist();
+
+    if ( empty( $allowlist ) ) {
+        error_log( 'HeyTrisha: Specification active but allowlist empty — using full schema.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+        if ( $query !== '' ) {
+            return heytrisha_augment_schema_with_query_tables( $live_schema, $query );
+        }
+        return $live_schema;
+    }
+
+    $narrow = heytrisha_intersect_compact_schema_with_spec_allowlist( $live_schema, $allowlist );
+
+    if ( empty( $narrow ) ) {
+        // Still try query-matched tables when spec allowlist missed a custom table the user named.
+        if ( $query !== '' ) {
+            $from_query = heytrisha_augment_schema_with_query_tables( array(), $query );
+            if ( ! empty( $from_query ) ) {
+                return $from_query;
+            }
+        }
+        return array( '_heytrisha_spec_error' => 'Your specification file does not match any tables in your database. Please update or delete the specification.' );
+    }
+
+    if ( $query !== '' ) {
+        return heytrisha_augment_schema_with_query_tables( $narrow, $query );
+    }
+
+    return $narrow;
+}
+
+/**
+ * Bump schema/spec revision so open admin chatbot UIs can sync in realtime.
+ *
+ * @return int New revision (Unix timestamp).
+ */
+function heytrisha_bump_schema_revision() {
+    $r = time();
+    update_option( 'heytrisha_schema_revision', $r );
+
+    return $r;
+}
+
+/**
+ * Current schema/spec revision (for client sync).
+ *
+ * @return int
+ */
+function heytrisha_get_schema_revision() {
+    return (int) get_option( 'heytrisha_schema_revision', 0 );
 }
 
 // ✅ REMOVED: Laravel proxy function - now using external API
@@ -2287,43 +3046,110 @@ add_filter('rest_pre_serve_request', function($served, $result, $request, $serve
 function heytrisha_register_rest_routes() {
     register_rest_route('heytrisha/v1', '/config', array(
         'methods' => 'GET',
-        'callback' => function () {
-            // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput -- REST API auth check
-            $provided = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
+        'callback' => function (WP_REST_Request $request) {
+            // Get Multisite information
+            $is_multisite = is_multisite();
+            $current_site_id = $is_multisite ? get_current_blog_id() : 1;
+
+            // Never return raw secrets (API keys, passwords, payment secrets).
+            $openai_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_api_key', '');
+            $db_password = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_DB_PASSWORD, 'heytrisha_db_password', '');
+            $wp_api_password = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_WP_API_PASSWORD, 'heytrisha_wordpress_api_password', '');
+            $wc_consumer_secret = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_WC_CONSUMER_SECRET, 'heytrisha_woocommerce_consumer_secret', '');
+            $shared_token = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_SHARED_TOKEN, 'heytrisha_shared_token', '');
+
+            return array(
+                'wordpress_info' => array(
+                    'site_url' => get_site_url(),
+                    'is_multisite' => $is_multisite,
+                    'current_site_id' => $current_site_id,
+                ),
+                'configured' => array(
+                    'openai_api_key' => !empty($openai_key),
+                    'database_password' => !empty($db_password),
+                    'wordpress_api_password' => !empty($wp_api_password),
+                    'woocommerce_consumer_secret' => !empty($wc_consumer_secret),
+                    'shared_token' => !empty($shared_token),
+                ),
+            );
+        },
+        'permission_callback' => function (WP_REST_Request $request) {
+            // Prefer header-based auth (Authorization: Bearer <token>) but keep query param for backward compatibility.
+            $provided = '';
+            $auth = $request->get_header('authorization');
+            if (!empty($auth) && preg_match('/^Bearer\\s+(.+)$/i', $auth, $m)) {
+                $provided = trim($m[1]);
+            }
+            if (empty($provided)) {
+                $provided = $request->get_header('x-heytrisha-token');
+            }
+            if (empty($provided)) {
+                // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput -- REST API auth check
+                $provided = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
+            }
+
             $expected = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_SHARED_TOKEN, 'heytrisha_shared_token', '');
             if (empty($provided) || empty($expected) || !hash_equals($expected, $provided)) {
                 return new WP_Error('forbidden', 'Invalid or missing token.', array('status' => 403));
             }
 
-            // Get Multisite information
-            $is_multisite = is_multisite();
-            $current_site_id = $is_multisite ? get_current_blog_id() : 1;
-            
-            return array(
-                'openai_api_key' => heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_api_key', ''),
-                'database' => array(
-                    'host' => get_option('heytrisha_db_host', ''),
-                    'port' => get_option('heytrisha_db_port', ''),
-                    'name' => get_option('heytrisha_db_name', ''),
-                    'user' => get_option('heytrisha_db_user', ''),
-                    'password' => heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_DB_PASSWORD, 'heytrisha_db_password', ''),
-                ),
-                'wordpress_api' => array(
-                    'url' => get_option('heytrisha_wordpress_api_url', get_site_url()),
-                    'user' => get_option('heytrisha_wordpress_api_user', ''),
-                    'password' => heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_WP_API_PASSWORD, 'heytrisha_wordpress_api_password', ''),
-                ),
-                'woocommerce_api' => array(
-                    'consumer_key' => get_option('heytrisha_woocommerce_consumer_key', ''),
-                    'consumer_secret' => heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_WC_CONSUMER_SECRET, 'heytrisha_woocommerce_consumer_secret', ''),
-                ),
-                'wordpress_info' => array(
-                    'is_multisite' => $is_multisite,
-                    'current_site_id' => $current_site_id,
-                ),
-            );
+            return true;
+        }
+    ));
+
+    register_rest_route('heytrisha/v1', '/schema', array(
+        'methods'             => 'GET',
+        'permission_callback' => 'heytrisha_verify_server_api_key',
+        'callback'            => function () {
+            $schema = heytrisha_get_database_schema();
+            return rest_ensure_response(array(
+                'success' => true,
+                'tables'  => $schema,
+            ));
         },
-        'permission_callback' => '__return_true'
+    ));
+
+    register_rest_route('heytrisha/v1', '/execute-sql', array(
+        'methods'             => 'POST',
+        'permission_callback' => 'heytrisha_verify_server_api_key',
+        'callback'            => function ( WP_REST_Request $request ) {
+            $sql       = $request->get_param( 'sql' );
+            $max_limit = (int) $request->get_param( 'max_limit' );
+            if ( $max_limit < 1 ) {
+                $max_limit = 200;
+            }
+            $max_limit = min( $max_limit, 1000 );
+
+            if ( ! is_string( $sql ) || trim( $sql ) === '' ) {
+                return new WP_Error( 'invalid_sql', 'SQL query is required.', array( 'status' => 400 ) );
+            }
+
+            $prepared = heytrisha_prepare_sql_for_execution( $sql, $max_limit );
+            if ( is_wp_error( $prepared ) ) {
+                return $prepared;
+            }
+
+            $results = heytrisha_run_read_only_sql( $prepared );
+            if ( is_wp_error( $results ) ) {
+                return $results;
+            }
+
+            return rest_ensure_response(array(
+                'success' => true,
+                'data'    => $results,
+            ));
+        },
+        'args'                => array(
+            'sql'       => array(
+                'required'          => true,
+                'type'              => 'string',
+                'sanitize_callback' => 'sanitize_textarea_field',
+            ),
+            'max_limit' => array(
+                'required' => false,
+                'type'     => 'integer',
+            ),
+        ),
     ));
     
     // ✅ Proxy endpoint for Laravel API - routes through admin-ajax.php (hidden from Network tab)
@@ -2403,6 +3229,45 @@ function heytrisha_register_rest_routes() {
     */
 }
 add_action('rest_api_init', 'heytrisha_register_rest_routes');
+
+/**
+ * Strip low-value internal WordPress/WooCommerce columns from result rows
+ * so the chatbot only shows meaningful data to the end user.
+ *
+ * @param array $results Rows of ARRAY_A results.
+ * @return array Cleaned results with internal columns removed.
+ */
+function heytrisha_strip_low_value_columns( $results ) {
+    if ( ! is_array( $results ) || empty( $results ) ) {
+        return $results;
+    }
+
+    $low_value = array(
+        'post_author', 'post_date_gmt', 'post_modified_gmt', 'post_modified',
+        'post_content_filtered', 'post_parent', 'post_mime_type', 'post_password',
+        'post_name', 'post_type', 'comment_count', 'comment_status', 'ping_status',
+        'to_ping', 'pinged', 'guid', 'menu_order',
+        'ip_address', 'customer_ip_address', 'cart_hash', 'transaction_id',
+        'date_updated_gmt', 'date_completed_gmt', 'date_paid_gmt',
+        'billing_index', 'shipping_index',
+    );
+
+    foreach ( $results as $idx => $row ) {
+        if ( ! is_array( $row ) ) {
+            continue;
+        }
+        foreach ( array_keys( $row ) as $key ) {
+            $lower = strtolower( $key );
+            if ( in_array( $lower, $low_value, true ) ) {
+                unset( $results[ $idx ][ $key ] );
+            } elseif ( substr( $lower, -4 ) === '_gmt' ) {
+                unset( $results[ $idx ][ $key ] );
+            }
+        }
+    }
+
+    return array_values( $results );
+}
 
 /**
  * Transform raw SQL results into WooCommerce order summaries when appropriate.
@@ -2549,8 +3414,552 @@ function heytrisha_verify_nonce_for_admin($nonce, $action) {
     return $valid;
 }
 
+/**
+ * Verify HeyTrisha server API key from REST request (Bearer or X-HeyTrisha-API-Key header).
+ *
+ * @param WP_REST_Request $request REST request.
+ * @return true|WP_Error
+ */
+function heytrisha_verify_server_api_key( WP_REST_Request $request ) {
+    $provided = '';
+    $auth     = $request->get_header( 'authorization' );
+    if ( ! empty( $auth ) && preg_match( '/^Bearer\s+(.+)$/i', $auth, $matches ) ) {
+        $provided = trim( $matches[1] );
+    }
+    if ( empty( $provided ) ) {
+        $provided = $request->get_header( 'x-heytrisha-api-key' );
+    }
+
+    $api_key = heytrisha_get_credential( HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '' );
+    if ( empty( $provided ) || empty( $api_key ) ) {
+        return new WP_Error( 'forbidden', 'Invalid or missing API key.', array( 'status' => 403 ) );
+    }
+
+    $key_hash = hash( 'sha256', $api_key );
+    if ( hash_equals( $key_hash, $provided ) || hash_equals( $api_key, $provided ) ) {
+        return true;
+    }
+
+    return new WP_Error( 'forbidden', 'Invalid or missing API key.', array( 'status' => 403 ) );
+}
+
+/**
+ * Validate, sanitize, and cap a SQL query before read-only execution.
+ *
+ * @param string $sql      SQL query.
+ * @param int    $max_limit Maximum LIMIT value.
+ * @return string|WP_Error Prepared SQL or error.
+ */
+function heytrisha_prepare_sql_for_execution( $sql, $max_limit = 200 ) {
+    if ( ! class_exists( 'HeyTrisha_SQL_Validator' ) ) {
+        return new WP_Error( 'invalid_sql', 'SQL validator is not available.', array( 'status' => 500 ) );
+    }
+
+    $validation = HeyTrisha_SQL_Validator::validate( $sql );
+    if ( ! $validation['valid'] ) {
+        $user_message = class_exists('HeyTrisha_Chat_Errors')
+            ? HeyTrisha_Chat_Errors::from_sql_validation($validation)
+            : ($validation['error'] ?? 'Only read-only SQL queries are allowed.');
+        return new WP_Error(
+            'blocked_sql',
+            $user_message,
+            array( 'status' => 403 )
+        );
+    }
+
+    $sql = HeyTrisha_SQL_Validator::sanitize_table_names( $sql );
+    $sql = HeyTrisha_SQL_Validator::ensure_limit( $sql, $max_limit );
+
+    $sql_safety = heytrisha_enforce_sql_safety( $sql );
+    if ( is_wp_error( $sql_safety ) ) {
+        return $sql_safety;
+    }
+
+    return $sql;
+}
+
+/**
+ * Execute a validated read-only SQL query against the WordPress database.
+ *
+ * @param string $sql Prepared read-only SQL.
+ * @return array|WP_Error Result rows or error.
+ */
+function heytrisha_run_read_only_sql( $sql ) {
+    global $wpdb;
+
+    $wpdb->suppress_errors( true );
+    $results  = $wpdb->get_results( $sql, ARRAY_A );
+    $db_error = $wpdb->last_error;
+    $wpdb->suppress_errors( false );
+
+    if ( $db_error ) {
+        $user_message = class_exists('HeyTrisha_Chat_Errors')
+            ? HeyTrisha_Chat_Errors::from_database_error($db_error)
+            : ('Database error: ' . $db_error);
+        return new WP_Error( 'db_error', $user_message, array( 'status' => 500 ) );
+    }
+
+    return is_array( $results ) ? $results : array();
+}
+
+/**
+ * Enforce analytics-safe SQL before local execution.
+ *
+ * This is a defense-in-depth filter against accidental/LLM-generated exfiltration
+ * of secrets (passwords/tokens/keys) and payment instruments.
+ *
+ * @param string $sql SQL query
+ * @return true|WP_Error True if allowed, WP_Error otherwise
+ */
+function heytrisha_enforce_sql_safety($sql) {
+    if (!is_string($sql) || trim($sql) === '') {
+        return new WP_Error('invalid_sql', 'Invalid SQL query.', array('status' => 400));
+    }
+
+    // Remove quoted strings to reduce false negatives on pattern checks.
+    $check_sql = preg_replace("/'[^']*'/", "''", $sql);
+    $check_sql = preg_replace('/"[^"]*"/', '""', $check_sql);
+    $check_sql = strtolower($check_sql);
+
+    // Block tables that commonly contain secrets/PII/payment instruments.
+    $blocked_table_markers = array(
+        ' users', '`users`', '.users', '_users',
+        ' usermeta', '`usermeta`', '.usermeta', '_usermeta',
+        ' options', '`options`', '.options', '_options',
+        ' woocommerce_payment_tokens', '`woocommerce_payment_tokens`', '_woocommerce_payment_tokens',
+        ' woocommerce_payment_tokenmeta', '`woocommerce_payment_tokenmeta`', '_woocommerce_payment_tokenmeta',
+        ' woocommerce_api_keys', '`woocommerce_api_keys`', '_woocommerce_api_keys',
+        ' woocommerce_sessions', '`woocommerce_sessions`', '_woocommerce_sessions',
+    );
+    foreach ($blocked_table_markers as $marker) {
+        if (strpos($check_sql, $marker) !== false) {
+            $msg = class_exists('HeyTrisha_Chat_Errors')
+                ? HeyTrisha_Chat_Errors::sensitive_table()
+                : "Sorry, you don't have access to that specific data. That information is restricted for privacy and security.";
+            return new WP_Error('blocked_sql', $msg, array('status' => 403));
+        }
+    }
+
+    // Block obvious sensitive columns/keywords even if table names are obfuscated.
+    $blocked_patterns = array(
+        '/\buser_pass\b/i',
+        '/\b(pass|passwd|password|pwd)\b/i',
+        '/\b(secret|api_key|apikey|token|access_token|refresh_token|consumer_secret)\b/i',
+        '/\b(card|cvc|cvv|pan)\b/i',
+        '/\b(pm_[a-z0-9_]+)\b/i',
+    );
+    foreach ($blocked_patterns as $pattern) {
+        if (preg_match($pattern, $sql)) {
+            $msg = class_exists('HeyTrisha_Chat_Errors')
+                ? HeyTrisha_Chat_Errors::sensitive_data_access()
+                : "Sorry, you don't have access to that specific data. Passwords, API keys, and payment details cannot be shown in chat.";
+            return new WP_Error('blocked_sql', $msg, array('status' => 403));
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Whether a response array key should never appear in chat (credentials / SQL leakage).
+ *
+ * @param string $key Key name.
+ * @return bool
+ */
+function heytrisha_is_sensitive_chat_key($key) {
+    if (!is_string($key) || $key === '') {
+        return false;
+    }
+    $l = strtolower($key);
+    // Exact keys that must never appear in chat payloads.
+    $exact = array('sql', 'sql_query', 'raw_sql', 'password', 'user_pass', 'api_key', 'openai_key', 'consumer_secret');
+    if (in_array($l, $exact, true)) {
+        return true;
+    }
+    // Substrings in field names (credentials / payment / tokens).
+    $needles = array(
+        'password', 'passwd', 'user_pass', 'pass_hash', 'hashed_password',
+        'secret', 'consumer_secret', 'api_key', 'apikey', 'openai',
+        'access_token', 'refresh_token', 'session_token', 'auth_token', 'bearer',
+        'private_key', 'encryption_key', 'payment_token', 'card', '_cvv', 'cvc',
+    );
+    foreach ($needles as $n) {
+        if (strpos($l, $n) !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Redact hash-like and API-key-like substrings from free text (bot messages, errors).
+ *
+ * @param string $text Text.
+ * @return string
+ */
+function heytrisha_redact_sensitive_chat_string($text) {
+    if (!is_string($text) || $text === '') {
+        return $text;
+    }
+    $out = $text;
+    // WordPress / bcrypt / argon style hashes
+    $out = preg_replace('/\$2[ayb]\$[.\/0-9A-Za-z]{50,}/', '[REDACTED]', $out);
+    $out = preg_replace('/\$P\$[.\/A-Za-z0-9]{30,}/', '[REDACTED]', $out);
+    $out = preg_replace('/\$wp\$2[ayb]\$[^\s\'"]{20,}/', '[REDACTED]', $out);
+    // Common API key patterns
+    $out = preg_replace('/\bsk-[a-zA-Z0-9]{10,}\b/', '[REDACTED]', $out);
+    $out = preg_replace('/\bsk_(live|test)_[a-zA-Z0-9]{10,}\b/', '[REDACTED]', $out);
+    $out = preg_replace('/\b(pk|rk)_(live|test)_[a-zA-Z0-9]{10,}\b/', '[REDACTED]', $out);
+    $out = preg_replace('/\bwhsec_[a-zA-Z0-9]{10,}\b/', '[REDACTED]', $out);
+    $out = preg_replace('/\bbase64:[A-Za-z0-9+\/]{20,}={0,2}\b/', '[REDACTED]', $out);
+    return $out;
+}
+
+/**
+ * Recursively remove sensitive keys and scrub string values before sending to chat UI.
+ *
+ * @param mixed $data Response fragment.
+ * @return mixed
+ */
+function heytrisha_redact_sensitive_for_chat($data) {
+    if (is_string($data)) {
+        return heytrisha_redact_sensitive_chat_string($data);
+    }
+    if (!is_array($data)) {
+        return $data;
+    }
+    $out = array();
+    foreach ($data as $key => $value) {
+        if (is_string($key) && heytrisha_is_sensitive_chat_key($key)) {
+            continue;
+        }
+        $out[ $key ] = heytrisha_redact_sensitive_for_chat($value);
+    }
+    return $out;
+}
+
+/**
+ * Normalize conversation history for API / OpenAI (role + content only).
+ *
+ * @param mixed $raw Array of turns or JSON-decoded value.
+ * @param int   $max_turns Maximum messages to keep (oldest dropped first).
+ * @return array<int, array{role: string, content: string}>
+ */
+function heytrisha_normalize_conversation_history( $raw, $max_turns = 20 ) {
+    if ( ! is_array( $raw ) || empty( $raw ) ) {
+        return array();
+    }
+
+    $out = array();
+    foreach ( $raw as $turn ) {
+        if ( ! is_array( $turn ) ) {
+            continue;
+        }
+        $role = isset( $turn['role'] ) ? strtolower( sanitize_text_field( (string) $turn['role'] ) ) : '';
+        if ( ! in_array( $role, array( 'user', 'assistant' ), true ) ) {
+            continue;
+        }
+        $content = isset( $turn['content'] ) ? trim( wp_strip_all_tags( (string) $turn['content'] ) ) : '';
+        if ( $content === '' ) {
+            continue;
+        }
+        if ( strlen( $content ) > 800 ) {
+            $content = substr( $content, 0, 800 ) . '…';
+        }
+        $out[] = array(
+            'role'    => $role,
+            'content' => $content,
+        );
+    }
+
+    if ( count( $out ) > $max_turns ) {
+        $out = array_slice( $out, -$max_turns );
+    }
+
+    return $out;
+}
+
+/**
+ * Load prior chat messages for multi-turn context.
+ *
+ * @param int    $chat_id Chat ID.
+ * @param string $exclude_content Optional user message to exclude (current turn).
+ * @param int    $max_turns Max messages.
+ * @return array<int, array{role: string, content: string}>
+ */
+function heytrisha_get_conversation_history_for_api( $chat_id, $exclude_content = '', $max_turns = 20 ) {
+    $chat_id = absint( $chat_id );
+    if ( $chat_id < 1 || ! class_exists( 'HeyTrisha_Database' ) ) {
+        return array();
+    }
+
+    $db       = HeyTrisha_Database::get_instance();
+    $messages = $db->get_messages( $chat_id, $max_turns + 5 );
+    if ( empty( $messages ) ) {
+        return array();
+    }
+
+    $turns = array();
+    foreach ( $messages as $msg ) {
+        $role = isset( $msg->role ) ? (string) $msg->role : '';
+        if ( ! in_array( $role, array( 'user', 'assistant' ), true ) ) {
+            continue;
+        }
+        $content = isset( $msg->content ) ? trim( wp_strip_all_tags( (string) $msg->content ) ) : '';
+        if ( $content === '' ) {
+            continue;
+        }
+        if ( $exclude_content !== '' && $role === 'user' && trim( $exclude_content ) === $content ) {
+            continue;
+        }
+        $turns[] = array(
+            'role'    => $role,
+            'content' => strlen( $content ) > 800 ? substr( $content, 0, 800 ) . '…' : $content,
+        );
+    }
+
+    if ( count( $turns ) > $max_turns ) {
+        $turns = array_slice( $turns, -$max_turns );
+    }
+
+    return $turns;
+}
+
 // ✅ Admin-Ajax handler for external API proxy
 // This is a thin client that forwards requests to external HeyTrisha engine
+
+/**
+ * Count WooCommerce products in wp_posts (catalog source of truth).
+ *
+ * @return int
+ */
+function heytrisha_count_wc_products() {
+    global $wpdb;
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+    return (int) $wpdb->get_var(
+        "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'product' AND post_status NOT IN ('trash','auto-draft')"
+    );
+}
+
+/**
+ * Whether the question/SQL is about products or categories.
+ *
+ * @param string $question User question.
+ * @param string $sql      Executed SQL.
+ */
+function heytrisha_is_product_catalog_context( $question, $sql ) {
+    $blob = strtolower( (string) $question . ' ' . (string) $sql );
+    if ( preg_match( '/\b(product|products|categor|catalog|sku|homam|puja|item|items)\b/', $blob ) ) {
+        return true;
+    }
+    return (bool) preg_match( "/post_type\s*=\s*['\"]product['\"]/i", (string) $sql );
+}
+
+/**
+ * Ensure wp_posts is in schema for product fallback (spec allowlist may omit it).
+ *
+ * @param array<string, mixed> $schema Schema.
+ * @return array<string, mixed>
+ */
+function heytrisha_ensure_posts_in_schema_for_products( $schema ) {
+    if ( ! is_array( $schema ) ) {
+        $schema = array();
+    }
+    global $wpdb;
+    $posts_table = $wpdb->posts;
+    if ( isset( $schema[ $posts_table ] ) ) {
+        return $schema;
+    }
+    $cols = heytrisha_get_table_column_names_live( $posts_table );
+    if ( ! empty( $cols ) ) {
+        $schema[ $posts_table ] = $cols;
+    }
+    return $schema;
+}
+
+/**
+ * Retry with fuzzy or list-all product SQL when the primary query returns no rows.
+ *
+ * @param string               $query  User question.
+ * @param array<string, mixed> $schema Effective schema.
+ * @return array<int, array<string, mixed>>|null
+ */
+function heytrisha_retry_product_query_on_empty( $query, $schema ) {
+    if ( ! class_exists( 'HeyTrisha_Fuzzy_Search' ) || ! is_array( $schema ) ) {
+        return null;
+    }
+
+    $schema = heytrisha_ensure_posts_in_schema_for_products( $schema );
+
+    $attempts = array(
+        HeyTrisha_Fuzzy_Search::build_product_search_sql( $query, $schema ),
+        HeyTrisha_Fuzzy_Search::build_list_products_sql( $schema ),
+    );
+
+    foreach ( $attempts as $retry_sql ) {
+        if ( ! is_string( $retry_sql ) || trim( $retry_sql ) === '' ) {
+            continue;
+        }
+        $prepared = heytrisha_prepare_sql_for_execution( $retry_sql, 200 );
+        if ( is_wp_error( $prepared ) ) {
+            continue;
+        }
+        $rows = heytrisha_run_read_only_sql( $prepared );
+        if ( ! is_wp_error( $rows ) && is_array( $rows ) && count( $rows ) > 0 ) {
+            return $rows;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param string $sql      Executed SQL.
+ * @param string $question User question (for product-aware diagnostics).
+ * @return array<string, mixed>
+ */
+function heytrisha_gather_empty_result_hints( $sql, $question = '' ) {
+    $hints = array(
+        'table_name'        => null,
+        'table_row_count'   => null,
+        'product_count'     => null,
+        'has_where'         => false,
+        'has_date_filter'   => false,
+        'has_status_filter' => false,
+        'has_like_filter'   => false,
+    );
+
+    if ( ! is_string( $sql ) || trim( $sql ) === '' ) {
+        return $hints;
+    }
+
+    $hints['has_where']         = (bool) preg_match( '/\bWHERE\b/i', $sql );
+    $hints['has_date_filter']   = (bool) preg_match( '/\b(date|created|modified|_date|between|curdate|now\s*\()\b/i', $sql );
+    $hints['has_status_filter'] = (bool) preg_match( '/\bstatus\b/i', $sql );
+    $hints['has_like_filter']   = (bool) preg_match( '/\bLIKE\b/i', $sql );
+
+    if ( heytrisha_is_product_catalog_context( $question, $sql ) ) {
+        $hints['product_count']   = heytrisha_count_wc_products();
+        $hints['table_row_count'] = $hints['product_count'];
+        return $hints;
+    }
+
+    $table = null;
+    if ( preg_match( '/\bFROM\s+`?([a-zA-Z0-9_]+)`?/i', $sql, $matches ) ) {
+        $table = $matches[1];
+    }
+
+    if ( $table === null || ! preg_match( '/^[a-zA-Z0-9_]+$/', $table ) ) {
+        return $hints;
+    }
+
+    $hints['table_name'] = $table;
+
+    global $wpdb;
+    $table_exists = $wpdb->get_var(
+        $wpdb->prepare( 'SHOW TABLES LIKE %s', $table )
+    );
+    if ( $table_exists !== $table ) {
+        return $hints;
+    }
+
+    $count_sql = 'SELECT COUNT(*) AS cnt FROM `' . $table . '`';
+    $prepared  = heytrisha_prepare_sql_for_execution( $count_sql, 1 );
+    if ( is_wp_error( $prepared ) ) {
+        return $hints;
+    }
+
+    $wpdb->suppress_errors( true );
+    $count_row = $wpdb->get_row( $prepared, ARRAY_A );
+    $wpdb->suppress_errors( false );
+
+    if ( is_array( $count_row ) && isset( $count_row['cnt'] ) ) {
+        $hints['table_row_count'] = (int) $count_row['cnt'];
+    }
+
+    return $hints;
+}
+
+/**
+ * Use OpenAI to turn SQL result rows into a friendly, conversational answer.
+ *
+ * @param string $user_question          The original question the user asked.
+ * @param array  $rows                   Cleaned result rows (already redacted).
+ * @param array  $conversation_history   Optional prior turns for follow-up context.
+ * @return string Natural-language answer, or empty string on failure.
+ */
+function heytrisha_summarize_results_with_openai( $user_question, $rows, $conversation_history = array() ) {
+    $openai_key = heytrisha_get_credential( HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_api_key', '' );
+    if ( empty( $openai_key ) || ! is_array( $rows ) || empty( $rows ) ) {
+        return '';
+    }
+
+    // Keep the payload small — cap at 20 rows and truncate long field values.
+    $capped = array_slice( $rows, 0, 20 );
+    $clean  = array();
+    foreach ( $capped as $row ) {
+        $r = array();
+        foreach ( $row as $k => $v ) {
+            $r[ $k ] = ( strlen( (string) $v ) > 200 ) ? substr( (string) $v, 0, 200 ) . '…' : $v;
+        }
+        $clean[] = $r;
+    }
+
+    $data_json = wp_json_encode( $clean );
+    $total     = count( $rows );
+    $shown     = count( $clean );
+    $footer    = ( $total > $shown ) ? " (showing {$shown} of {$total} results)" : '';
+
+    $system_prompt = 'You are a helpful assistant for a WooCommerce store. ' .
+                     'Answer the user\'s question using only the data provided. ' .
+                     'If product rows are included in the data, list or summarize them — never say the store has no products when rows are present. ' .
+                     'Be concise and friendly. Use plain text; do NOT use markdown, bullet lists, or special symbols. ' .
+                     'Never reveal passwords, API keys, email addresses, IP addresses, or any sensitive data.';
+
+    $user_prompt = "User question: \"{$user_question}\"\n\n" .
+                   "Data from the database{$footer}:\n{$data_json}\n\n" .
+                   'Write a short, helpful answer to the user\'s question based on this data.';
+
+    $messages = array(
+        array( 'role' => 'system', 'content' => $system_prompt ),
+    );
+    $history  = heytrisha_normalize_conversation_history( $conversation_history, 12 );
+    foreach ( $history as $turn ) {
+        $messages[] = array(
+            'role'    => $turn['role'],
+            'content' => $turn['content'],
+        );
+    }
+    $messages[] = array( 'role' => 'user', 'content' => $user_prompt );
+
+    $response = wp_remote_post(
+        'https://api.openai.com/v1/chat/completions',
+        array(
+            'timeout' => 20,
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $openai_key,
+                'Content-Type'  => 'application/json',
+            ),
+            'body' => wp_json_encode( array(
+                'model'       => 'gpt-4o-mini',
+                'messages'    => $messages,
+                'max_tokens'  => 300,
+                'temperature' => 0.3,
+            ) ),
+        )
+    );
+
+    if ( is_wp_error( $response ) ) {
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+        error_log( 'HeyTrisha: OpenAI summarization failed: ' . $response->get_error_message() );
+        return '';
+    }
+
+    $body = json_decode( wp_remote_retrieve_body( $response ), true );
+    $answer = $body['choices'][0]['message']['content'] ?? '';
+    return trim( (string) $answer );
+}
+
 function heytrisha_ajax_query_handler() {
     // Check user permissions first
     if (!current_user_can('manage_options')) {
@@ -2675,11 +4084,53 @@ function heytrisha_ajax_query_handler() {
         $query = sanitize_text_field($request_data['query']);
         $confirmed = isset($request_data['confirmed']) ? filter_var($request_data['confirmed'], FILTER_VALIDATE_BOOLEAN) : false;
         $confirmation_data = isset($request_data['confirmation_data']) ? $request_data['confirmation_data'] : null;
+        $chat_id = isset($request_data['chat_id']) ? absint($request_data['chat_id']) : 0;
+
+        // Conversation history for multi-turn follow-ups (client JSON or load from DB).
+        $conversation_history = array();
+        if ( ! empty( $request_data['conversation_history'] ) ) {
+            $raw_history = $request_data['conversation_history'];
+            if ( is_string( $raw_history ) ) {
+                $decoded = json_decode( $raw_history, true );
+                if ( json_last_error() === JSON_ERROR_NONE && is_array( $decoded ) ) {
+                    $conversation_history = heytrisha_normalize_conversation_history( $decoded );
+                }
+            } elseif ( is_array( $raw_history ) ) {
+                $conversation_history = heytrisha_normalize_conversation_history( $raw_history );
+            }
+        }
+        if ( empty( $conversation_history ) && $chat_id > 0 ) {
+            $conversation_history = heytrisha_get_conversation_history_for_api( $chat_id, $query );
+        }
+
+        // Refuse credential / payment-data requests before any API or SQL runs.
+        if (preg_match('/\b(password|passwd|pwd|passphrase|credentials|api\s*key|secret\s*key|consumer\s*secret|payment\s*token|saved\s*card|card\s*number|cvv|cvc|user_pass)\b/i', $query)
+            || preg_match('/\b(show|give|get|tell|reveal|display|what\s+is|what\'?s)\b.{0,60}\b(password|pwd|credentials)\b/i', $query)) {
+            wp_send_json(array(
+                'success' => true,
+                'message' => class_exists('HeyTrisha_Chat_Errors')
+                    ? HeyTrisha_Chat_Errors::sensitive_data_access()
+                    : "Sorry, you don't have access to that specific data. Passwords, API keys, and payment details cannot be shown in chat.",
+                'data' => null,
+            ));
+            return;
+        }
+
+        if (class_exists('HeyTrisha_Chat_Errors')) {
+            $blocked_intent = HeyTrisha_Chat_Errors::blocked_intent_from_query($query);
+            if ($blocked_intent !== null) {
+                wp_send_json(array(
+                    'success' => false,
+                    'message' => $blocked_intent,
+                ));
+                return;
+            }
+        }
         
         // Get external API URL and API key
         $api_url = get_option('heytrisha_api_url', 'https://api.heytrisha.com');
         $api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
-        
+
         if (empty($api_url) || empty($api_key)) {
             wp_send_json_error(array(
                 'message' => 'HeyTrisha API is not configured. Please configure the API URL and API key in settings.'
@@ -2687,9 +4138,19 @@ function heytrisha_ajax_query_handler() {
             return;
         }
         
-        // Get database schema for API
-        $schema = heytrisha_get_database_schema();
-        
+        // Get effective schema — includes custom tables named in the user's question
+        $schema = heytrisha_get_effective_schema_for_api( $query );
+
+        // Check for specification misconfiguration (allowlist matched nothing in live DB)
+        if ( isset( $schema['_heytrisha_spec_error'] ) ) {
+            wp_send_json( array(
+                'success' => true,
+                'message' => $schema['_heytrisha_spec_error'],
+                'data'    => null,
+            ) );
+            return;
+        }
+
         // Detect WooCommerce order storage mode (HPOS vs Legacy)
         $hpos_enabled = get_option('woocommerce_custom_orders_table_enabled', 'no') === 'yes';
         
@@ -2701,16 +4162,33 @@ function heytrisha_ajax_query_handler() {
         } else {
             $order_table_hint = 'legacy'; // Orders stored in wp_posts with post_type=shop_order
         }
-        
+
+        // Specification metadata for API-side RAG retrieval
+        $schema_manager       = HeyTrisha_Schema_Manager::get_instance();
+        $specification_active = $schema_manager->is_specification_active();
+        $spec_version         = get_option( 'heytrisha_spec_version', '' );
+        $stored_schema        = $schema_manager->get_schema();
+
         // Prepare request body for external API
         $request_body = array(
-            'question' => $query,
-            'site' => get_site_url(),
-            'context' => 'woocommerce',
-            'schema' => $schema, // Send database schema
-            'order_storage' => $order_table_hint, // HPOS or legacy
-            'table_prefix' => $wpdb->prefix, // Actual WordPress table prefix
+            'question'                 => $query,
+            'site'                     => get_site_url(),
+            'context'                  => 'woocommerce',
+            'schema'                   => $schema, // Effective schema (possibly filtered by spec)
+            'order_storage'            => $order_table_hint, // HPOS or legacy
+            'table_prefix'             => $wpdb->prefix, // Actual WordPress table prefix
+            'specification_active'     => $specification_active,
+            'specification_version'    => $spec_version,
+            'uploaded_schema_enforced' => ( is_array( $stored_schema ) && ! empty( $stored_schema ) ),
+            'hybrid_architecture_enabled' => ( (int) get_option( 'heytrisha_hybrid_architecture', 0 ) === 1 ),
         );
+
+        if ( ! empty( $conversation_history ) ) {
+            $request_body['conversation_history'] = $conversation_history;
+        }
+        if ( $chat_id > 0 ) {
+            $request_body['chat_id'] = $chat_id;
+        }
         
         if ($confirmed) {
             $request_body['confirmed'] = true;
@@ -2720,13 +4198,28 @@ function heytrisha_ajax_query_handler() {
             $request_body['confirmation_data'] = $confirmation_data;
         }
         
-        // Make request to external API
+        // Make request to external API (Bearer = HeyTrisha site API key from plugin settings)
         $api_endpoint = rtrim($api_url, '/') . '/api/query';
-        $response = wp_remote_post($api_endpoint, array(
-            'headers' => array(
+        $api_headers  = array_merge(
+            array(
                 'Authorization' => 'Bearer ' . $api_key,
-                'Content-Type' => 'application/json',
             ),
+            array(
+                'Content-Type' => 'application/json',
+            )
+        );
+        // OpenAI key from plugin (source of truth); API prefers this over .env / stale DB copy
+        if ( class_exists( 'HeyTrisha_Secure_Credentials' ) && function_exists( 'heytrisha_get_credential' ) ) {
+            $openai_plugin = heytrisha_get_credential( HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_api_key', '' );
+            if ( $openai_plugin === '' ) {
+                $openai_plugin = heytrisha_get_credential( HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_key', '' );
+            }
+            if ( $openai_plugin !== '' ) {
+                $api_headers['X-HeyTrisha-OpenAI-Key'] = $openai_plugin;
+            }
+        }
+        $response = wp_remote_post( $api_endpoint, array(
+            'headers' => $api_headers,
             'body' => wp_json_encode($request_body),
             'timeout' => 60,
             'sslverify' => false, // Disable SSL verify for shared hosting compatibility
@@ -2736,9 +4229,9 @@ function heytrisha_ajax_query_handler() {
         if (is_wp_error($response)) {
             // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Production error tracking
             error_log('HeyTrisha API Error: ' . $response->get_error_message() . ' | Endpoint: ' . $api_endpoint);
-            wp_send_json_error(array(
-                'message' => 'Failed to connect to HeyTrisha API: ' . $response->get_error_message(),
-                'endpoint' => $api_endpoint,
+            wp_send_json(array(
+                'success' => false,
+                'message' => 'Sorry, could not connect to the HeyTrisha API. Please check your API URL and key in settings.',
             ));
             return;
         }
@@ -2749,17 +4242,18 @@ function heytrisha_ajax_query_handler() {
         if ($response_code !== 200) {
             // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Production error tracking
             error_log('HeyTrisha API HTTP ' . $response_code . ' | Body: ' . substr($response_body, 0, 500) . ' | Endpoint: ' . $api_endpoint);
-            
-            // Try to decode JSON error response
-            $error_details = $response_body;
+
             $decoded_error = json_decode($response_body, true);
-            if ($decoded_error && isset($decoded_error['message'])) {
-                $error_details = $decoded_error['message'];
+            $user_message  = class_exists('HeyTrisha_Chat_Errors')
+                ? HeyTrisha_Chat_Errors::extract_response_message(is_array($decoded_error) ? $decoded_error : array())
+                : null;
+            if (empty($user_message)) {
+                $user_message = 'Sorry, the HeyTrisha API returned an error (HTTP ' . $response_code . '). Please try again.';
             }
-            
-            wp_send_json_error(array(
-                'message' => 'HeyTrisha API returned an error (HTTP ' . $response_code . ')',
-                'details' => $error_details,
+
+            wp_send_json(array(
+                'success' => false,
+                'message' => $user_message,
             ));
             return;
         }
@@ -2777,15 +4271,33 @@ function heytrisha_ajax_query_handler() {
         }
         
         // Check if API returned a conversational response (no SQL execution needed)
-        if (isset($decoded_response['success']) && $decoded_response['success'] && 
+        if (isset($decoded_response['success']) && $decoded_response['success'] &&
             isset($decoded_response['type']) && $decoded_response['type'] === 'conversation') {
-            wp_send_json(array(
+            wp_send_json(heytrisha_redact_sensitive_for_chat(array(
                 'success' => true,
                 'message' => isset($decoded_response['message']) ? $decoded_response['message'] : 'Hello! How can I help you?',
-            ));
+            )));
             return;
         }
-        
+
+        // Pre-rendered hybrid / global answers (do not re-run SQL on the plugin).
+        $response_type = isset($decoded_response['type']) ? (string) $decoded_response['type'] : '';
+        if (isset($decoded_response['success']) && $decoded_response['success'] &&
+            ! empty($decoded_response['answer']) &&
+            in_array($response_type, array('global', 'compare', 'hybrid'), true)) {
+            $payload = array(
+                'success' => true,
+                'message' => isset($decoded_response['message']) ? (string) $decoded_response['message'] : (string) $decoded_response['answer'],
+                'data'    => null,
+                'type'    => $response_type,
+            );
+            if (! empty($decoded_response['hybrid_insights']) && is_array($decoded_response['hybrid_insights'])) {
+                $payload['hybrid_insights'] = $decoded_response['hybrid_insights'];
+            }
+            wp_send_json(heytrisha_redact_sensitive_for_chat($payload));
+            return;
+        }
+
         // Check if API returned SQL query (new flow: API generates SQL, plugin executes it)
         if (isset($decoded_response['success']) && $decoded_response['success'] && isset($decoded_response['sql'])) {
             // API returned SQL query - execute it locally on plugin's database
@@ -2794,64 +4306,7 @@ function heytrisha_ajax_query_handler() {
             // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Debug logging for SQL troubleshooting
             error_log('Hey Trisha: SQL from API: ' . $sql);
             
-            // Load SQL validator if not already loaded
-            if (!class_exists('HeyTrisha_SQL_Validator')) {
-                $validator_file = HEYTRISHA_PLUGIN_DIR . 'includes/class-heytrisha-sql-validator.php';
-                if (file_exists($validator_file)) {
-                    require_once $validator_file;
-                }
-            }
-            
-            // Validate SQL query (use class if available, otherwise inline validation)
-            if (class_exists('HeyTrisha_SQL_Validator')) {
-                $validation = HeyTrisha_SQL_Validator::validate($sql);
-                if (!$validation['valid']) {
-                    wp_send_json_error(array(
-                        'message' => 'SQL validation failed: ' . $validation['error']
-                    ));
-                    return;
-                }
-                $sql = HeyTrisha_SQL_Validator::sanitize_table_names($sql);
-                $sql = HeyTrisha_SQL_Validator::ensure_limit($sql, 1000);
-            } else {
-                // Inline fallback validator when class file is not available
-                // 1. Only allow SELECT queries
-                if (!preg_match('/^\s*SELECT\s+/i', trim($sql))) {
-                    wp_send_json_error(array(
-                        'message' => 'Only SELECT queries are allowed.'
-                    ));
-                    return;
-                }
-                // 2. Block dangerous keywords
-                $dangerous = array('DELETE', 'DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE', 'REPLACE', 'GRANT', 'REVOKE', 'EXECUTE', 'EXEC', 'LOAD DATA', 'LOAD XML');
-                $sql_upper = strtoupper($sql);
-                foreach ($dangerous as $kw) {
-                    if (preg_match('/\b' . preg_quote($kw, '/') . '\b/', $sql_upper)) {
-                        wp_send_json_error(array(
-                            'message' => 'Dangerous SQL keyword detected: ' . $kw
-                        ));
-                        return;
-                    }
-                }
-                // 3. Block multiple statements
-                $check_sql = preg_replace("/'[^']*'/", '', $sql);
-                $check_sql = preg_replace('/"[^"]*"/', '', $check_sql);
-                if (substr_count($check_sql, ';') > 1) {
-                    wp_send_json_error(array(
-                        'message' => 'Multiple SQL statements are not allowed.'
-                    ));
-                    return;
-                }
-                // 4. Replace wp_ with actual table prefix
-                global $wpdb;
-                $sql = str_replace('wp_', $wpdb->prefix, $sql);
-                // 5. Ensure LIMIT exists
-                if (!preg_match('/\bLIMIT\s+\d+/i', $sql)) {
-                    $sql = rtrim($sql, ';') . ' LIMIT 1000';
-                }
-            }
-            
-            // ✅ CRITICAL: Fix common WooCommerce column name mismatches
+            // ✅ CRITICAL: Fix common WooCommerce column name mismatches (before read-only validation)
             // wc_orders (HPOS) has `total_amount`, NOT `total_sales`
             // wc_order_stats has `total_sales`, NOT `total_amount`
             global $wpdb;
@@ -2874,23 +4329,29 @@ function heytrisha_ajax_query_handler() {
                     error_log('Hey Trisha: Fixed column name: total_amount → total_sales (wc_order_stats uses total_sales)');
                 }
             }
+
+            if ( class_exists( 'HeyTrisha_Fuzzy_Search' ) && heytrisha_is_product_catalog_context( $query, $sql ) ) {
+                $sql = HeyTrisha_Fuzzy_Search::broaden_sql( $sql, $query );
+            }
             
-            // Execute SQL query
-            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Debug logging for SQL troubleshooting
-            error_log('Hey Trisha: Executing SQL: ' . $sql);
-            
-            // Suppress WordPress database error output (it outputs HTML divs before JSON)
-            $wpdb->suppress_errors(true);
-            $results = $wpdb->get_results($sql, ARRAY_A);
-            $db_error = $wpdb->last_error;
-            $wpdb->suppress_errors(false);
-            
-            // Check for database errors
-            if ($db_error) {
-                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Production error tracking
-                error_log('Hey Trisha: DB error: ' . $db_error . ' | SQL: ' . $sql);
+            $prepared_sql = heytrisha_prepare_sql_for_execution($sql, 200);
+            if (is_wp_error($prepared_sql)) {
                 wp_send_json_error(array(
-                    'message' => 'Database error: ' . $db_error
+                    'message' => $prepared_sql->get_error_message(),
+                ));
+                return;
+            }
+            $sql = $prepared_sql;
+
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Debug logging for SQL troubleshooting (truncate to avoid leaking data)
+            error_log('Hey Trisha: Executing SQL (truncated): ' . substr($sql, 0, 300));
+
+            $results = heytrisha_run_read_only_sql($sql);
+            if (is_wp_error($results)) {
+                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Production error tracking
+                error_log('Hey Trisha: DB error: ' . $results->get_error_message() . ' | SQL: ' . $sql);
+                wp_send_json_error(array(
+                    'message' => $results->get_error_message(),
                 ));
                 return;
             }
@@ -2918,36 +4379,71 @@ function heytrisha_ajax_query_handler() {
             // order summaries (ID, status, totals, items, etc.) so the admin
             // sees real order data instead of low-level post fields.
             $results = heytrisha_transform_order_results_for_display($results);
-            
+            $results = heytrisha_redact_sensitive_for_chat($results);
+            $results = heytrisha_strip_low_value_columns($results);
+
             // Format response for chatbot
             $row_count = is_array($results) ? count($results) : 0;
-            $explanation = isset($decoded_response['explanation']) ? $decoded_response['explanation'] : '';
-            $message = '';
-            
-            if ($row_count === 0) {
-                $message = "I couldn't find any results for your question.";
-            } elseif (!empty($explanation)) {
-                // Use AI-generated explanation for a more meaningful message
-                $message = esc_html($explanation) . " ({$row_count} result" . ($row_count > 1 ? 's' : '') . " found)";
-            } elseif ($row_count === 1) {
-                $message = "I found 1 result for your question.";
-            } else {
-                $message = "I found {$row_count} results for your question.";
+
+            if ( $row_count === 0 && heytrisha_is_product_catalog_context( $query, $sql ) ) {
+                $retry_rows = heytrisha_retry_product_query_on_empty( $query, heytrisha_ensure_posts_in_schema_for_products( $schema ) );
+                if ( is_array( $retry_rows ) && count( $retry_rows ) > 0 ) {
+                    $results   = heytrisha_strip_low_value_columns( $retry_rows );
+                    $row_count = count( $results );
+                }
             }
-            
-            // Return results in format expected by chatbot.js
-            // Format: { success: true, message: "...", data: [...] }
-            wp_send_json(array(
-                'success' => true,
-                'message' => $message,
-                'data' => $results,
-                'row_count' => $row_count
-            ));
+
+            if ($row_count === 0) {
+                $empty_hints = heytrisha_gather_empty_result_hints( $sql, $query );
+                $message     = class_exists( 'HeyTrisha_Chat_Errors' )
+                    ? HeyTrisha_Chat_Errors::empty_query_results( $query, $sql, $empty_hints )
+                    : 'I ran a database search but found no matching records. Try rephrasing with a broader date range or fewer filters.';
+
+                wp_send_json(array(
+                    'success' => true,
+                    'message' => heytrisha_redact_sensitive_chat_string( $message ),
+                    'data'    => null,
+                ));
+                return;
+            }
+
+            // Try to generate a natural-language answer via OpenAI.
+            $nl_answer = heytrisha_summarize_results_with_openai( $query, $results, $conversation_history );
+
+            if ( ! empty( $nl_answer ) ) {
+                // Return as a conversational message — no raw data rows needed.
+                wp_send_json(array(
+                    'success' => true,
+                    'message' => heytrisha_redact_sensitive_chat_string($nl_answer),
+                    'data'    => null,
+                ));
+            } else {
+                // Fallback: send the cleaned rows so the frontend can render them.
+                $message = $row_count === 1 ? "I found 1 result for your question." : "I found {$row_count} results for your question.";
+                wp_send_json(heytrisha_redact_sensitive_for_chat(array(
+                    'success'   => true,
+                    'message'   => $message,
+                    'data'      => $results,
+                    'row_count' => $row_count,
+                )));
+            }
             return;
         }
         
+        // API returned an error in the JSON body (HTTP 200 but success: false).
+        if (isset($decoded_response['success']) && !$decoded_response['success']) {
+            $err_message = class_exists('HeyTrisha_Chat_Errors')
+                ? HeyTrisha_Chat_Errors::extract_response_message($decoded_response)
+                : null;
+            wp_send_json(heytrisha_redact_sensitive_for_chat(array(
+                'success' => false,
+                'message' => $err_message ?: 'Sorry, I could not process that request. Please try again.',
+            )));
+            return;
+        }
+
         // Fallback: Return API response as-is (for backward compatibility)
-        wp_send_json($decoded_response);
+        wp_send_json(heytrisha_redact_sensitive_for_chat($decoded_response));
         
     } catch (Exception $e) {
         wp_send_json_error(array(
@@ -3163,6 +4659,30 @@ function heytrisha_ajax_update_chat() {
 }
 add_action('wp_ajax_heytrisha_update_chat', 'heytrisha_ajax_update_chat');
 
+/**
+ * Persist hybrid-architecture preference from the chat page toggle.
+ */
+function heytrisha_ajax_update_hybrid_architecture() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(array('message' => 'Unauthorized. Administrator access required.'));
+        return;
+    }
+
+    $nonce = isset($_POST['nonce']) ? sanitize_text_field(wp_unslash($_POST['nonce'])) : '';
+    if (!heytrisha_verify_nonce_for_admin($nonce, 'heytrisha_chatbot')) {
+        wp_send_json_error(array('message' => 'Security check failed. Please refresh the page and try again.'));
+        return;
+    }
+
+    $enabled = isset($_POST['hybrid_architecture']) && (string) wp_unslash($_POST['hybrid_architecture']) === '1';
+    update_option('heytrisha_hybrid_architecture', $enabled ? 1 : 0);
+
+    wp_send_json_success(array(
+        'hybrid_architecture' => $enabled,
+    ));
+}
+add_action('wp_ajax_heytrisha_update_hybrid_architecture', 'heytrisha_ajax_update_hybrid_architecture');
+
 // ============================================================================
 // End of AJAX chat handlers
 // ============================================================================
@@ -3192,6 +4712,7 @@ function heytrisha_ajax_get_personal_data() {
     $site_api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
 
     // Get data from local storage (primary source)
+    $stored_openai_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_key', '');
     $personal_data = array(
         'email' => get_option('heytrisha_user_email', ''),
         'first_name' => get_option('heytrisha_user_first_name', ''),
@@ -3199,15 +4720,20 @@ function heytrisha_ajax_get_personal_data() {
         'username' => get_option('heytrisha_user_username', ''),
         'db_name' => get_option('heytrisha_db_name', ''),
         'db_username' => get_option('heytrisha_db_user', ''),
-        'openai_key' => heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API, 'heytrisha_openai_key', ''),
+        'openai_key_configured' => !empty($stored_openai_key),
+        'api_url' => $api_url,
     );
 
     // Try to fetch from API and update local storage if available
     if (!empty($site_api_key) && !empty($api_url)) {
         $response = wp_remote_get(rtrim($api_url, '/') . '/api/site/info', array(
-            'headers' => array(
-                'Authorization' => 'Bearer ' . $site_api_key,
-                'Content-Type' => 'application/json',
+            'headers' => array_merge(
+                array(
+                    'Authorization' => 'Bearer ' . $site_api_key,
+                ),
+                array(
+                    'Content-Type' => 'application/json',
+                )
             ),
             'timeout' => 30,
             'sslverify' => true,
@@ -3239,6 +4765,39 @@ function heytrisha_ajax_get_personal_data() {
 }
 add_action('wp_ajax_heytrisha_get_personal_data', 'heytrisha_ajax_get_personal_data');
 
+// ✅ Clear all HeyTrisha connection / account data so the site can be registered on a new API server
+function heytrisha_ajax_reset_for_new_api_server() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(array('message' => 'Unauthorized. Administrator access required.'));
+        return;
+    }
+    $nonce = isset($_POST['nonce']) ? sanitize_text_field(wp_unslash($_POST['nonce'])) : '';
+    if (!heytrisha_verify_nonce_for_admin($nonce, 'heytrisha_personal_data')) {
+        wp_send_json_error(array('message' => 'Security check failed. Please refresh the page and try again.'));
+        return;
+    }
+    if (class_exists('HeyTrisha_Secure_Credentials')) {
+        $creds = HeyTrisha_Secure_Credentials::get_instance();
+        $creds->delete_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN);
+        $creds->delete_credential(HeyTrisha_Secure_Credentials::KEY_OPENAI_API);
+        $creds->delete_credential(HeyTrisha_Secure_Credentials::KEY_DB_PASSWORD);
+    }
+    delete_option('heytrisha_api_key');
+    delete_option('heytrisha_openai_key');
+    delete_option('heytrisha_openai_api_key');
+    delete_option('heytrisha_db_password');
+    update_option('heytrisha_user_email', '', false);
+    update_option('heytrisha_user_first_name', '', false);
+    update_option('heytrisha_user_last_name', '', false);
+    update_option('heytrisha_user_username', '', false);
+    update_option('heytrisha_db_name', '', false);
+    update_option('heytrisha_db_user', '', false);
+    update_option('heytrisha_api_url', '', false);
+    delete_transient('heytrisha_new_api_key');
+    wp_send_json_success(array('message' => 'Saved data cleared. Enter your full details and the new API base URL, then apply changes to register on the new server.'));
+}
+add_action('wp_ajax_heytrisha_reset_for_new_api_server', 'heytrisha_ajax_reset_for_new_api_server');
+
 // ✅ AJAX handler for updating personal data
 // Stores locally first, then syncs to API
 function heytrisha_ajax_update_personal_data() {
@@ -3259,8 +4818,10 @@ function heytrisha_ajax_update_personal_data() {
         return;
     }
 
-    // Get API URL and key
-    $api_url = get_option('heytrisha_api_url', 'https://api.heytrisha.com');
+    $updated_fields = array();
+
+    $stored_api_url_before = (string) get_option('heytrisha_api_url', '');
+    $api_url = $stored_api_url_before;
     $site_api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
 
     // Get and sanitize input data
@@ -3275,7 +4836,7 @@ function heytrisha_ajax_update_personal_data() {
     $db_password = isset($_POST['db_password']) ? wp_unslash($_POST['db_password']) : '';
 
     $errors = array();
-    $updated_fields = array();
+    $api_url_switch_pending = null;
 
     // ✅ STEP 1: Store locally first
     // Update email if provided and valid
@@ -3341,6 +4902,53 @@ function heytrisha_ajax_update_personal_data() {
         $updated_fields[] = 'db_password';
     }
 
+    // API base URL (when the URL actually changes, defer update_option until POST /api/register succeeds)
+    if (isset($_POST['api_url'])) {
+        $api_url_in = esc_url_raw(wp_unslash($_POST['api_url']));
+        if ($api_url_in !== '') {
+            if (function_exists('wp_http_validate_url')) {
+                $valid_api_url = wp_http_validate_url($api_url_in);
+            } else {
+                $valid_api_url = filter_var($api_url_in, FILTER_VALIDATE_URL) ? $api_url_in : false;
+            }
+            if (!empty($valid_api_url)) {
+                $old_norm = function_exists('untrailingslashit') ? untrailingslashit($stored_api_url_before) : rtrim($stored_api_url_before, '/');
+                $new_norm = function_exists('untrailingslashit') ? untrailingslashit($valid_api_url) : rtrim($valid_api_url, '/');
+                if ($old_norm !== $new_norm) {
+                    $api_url_switch_pending = $valid_api_url;
+                    $api_url = $valid_api_url;
+                } else {
+                    update_option('heytrisha_api_url', $valid_api_url);
+                    $api_url = $valid_api_url;
+                    $updated_fields[] = 'api_url';
+                }
+            } else {
+                $errors[] = 'Invalid API URL.';
+            }
+        }
+    }
+
+    if ($api_url_switch_pending !== null) {
+        if (empty($password) || strlen($password) < 8) {
+            $errors[] = 'Registering on a new API server requires an account password (at least 8 characters).';
+        }
+        if (empty($email) || !is_email($email)) {
+            $errors[] = 'A valid account email is required to register on the new server.';
+        }
+        if (empty($first_name) || empty($last_name)) {
+            $errors[] = 'First and last name are required.';
+        }
+        if (empty($username) || strlen((string) $username) < 3) {
+            $errors[] = 'Username is required and must be at least 3 characters.';
+        }
+        if (empty($openai_key)) {
+            $errors[] = 'OpenAI API key is required to register on the new server.';
+        }
+        if (empty($db_name) || empty($db_username) || $db_password === null || (string) $db_password === '') {
+            $errors[] = 'Database name, user, and password are all required to register on the new server.';
+        }
+    }
+
     // Return errors if any validation failed
     if (!empty($errors)) {
         wp_send_json_error(array(
@@ -3350,10 +4958,57 @@ function heytrisha_ajax_update_personal_data() {
         return;
     }
 
-    // ✅ STEP 2: Sync to API server
+    if ($api_url_switch_pending !== null) {
+        $reg_body = array(
+            'site_url' => get_site_url(),
+            'openai_key' => $openai_key,
+            'email' => $email,
+            'username' => $username,
+            'password' => $password,
+            'first_name' => $first_name,
+            'last_name' => $last_name,
+            'db_name' => $db_name,
+            'db_username' => $db_username,
+            'db_password' => $db_password,
+            'wordpress_version' => get_bloginfo('version'),
+            'woocommerce_version' => defined('WC_VERSION') ? WC_VERSION : 'not_installed',
+            'plugin_version' => defined('HEYTRISHA_VERSION') ? HEYTRISHA_VERSION : '1.0.0',
+        );
+
+        $new_key = heytrisha_api_register_request($api_url_switch_pending, $reg_body);
+        if (is_wp_error($new_key)) {
+            wp_send_json_error(array(
+                'message' => 'Registration on the new API server failed: ' . $new_key->get_error_message(),
+                'updated_fields' => $updated_fields,
+            ));
+            return;
+        }
+
+        update_option('heytrisha_api_url', $api_url_switch_pending);
+        heytrisha_set_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, $new_key);
+        set_transient('heytrisha_new_api_key', $new_key, 300);
+        if (!in_array('api_url', $updated_fields, true)) {
+            $updated_fields[] = 'api_url';
+        }
+        if (!in_array('api_key', $updated_fields, true)) {
+            $updated_fields[] = 'api_key';
+        }
+
+        wp_send_json_success(array(
+            'message' => 'This site is now registered on the new API server. Reloading to show your new API key…',
+            'updated_fields' => $updated_fields,
+            'reregistered' => true,
+            'redirect' => admin_url('admin.php?page=heytrisha-chatbot-settings&registered=1'),
+        ));
+        return;
+    }
+
+    $site_api_key = heytrisha_get_credential(HeyTrisha_Secure_Credentials::KEY_API_TOKEN, 'heytrisha_api_key', '');
+
+    // ✅ STEP 2: Sync to API server (PUT)
     $sync_success = true;
     $sync_message = '';
-    if (!empty($site_api_key) && !empty($api_url)) {
+    if ( ! empty( $site_api_key ) && ! empty( $api_url ) ) {
         $update_data = array();
 
         if (!empty($email)) {
@@ -3416,11 +5071,15 @@ function heytrisha_ajax_update_personal_data() {
                 $api_endpoint = rtrim($api_url, '/') . '/api/config?allow_direct=1';
                 $response = wp_remote_request($api_endpoint, array(
                     'method' => 'PUT',
-                    'headers' => array(
-                        'Authorization' => 'Bearer ' . $site_api_key,
-                        'Content-Type' => 'application/json',
-                        'X-Site-URL' => $site_url,
-                        'User-Agent' => 'HeyTrisha-WordPress-Plugin/' . HEYTRISHA_VERSION,
+                    'headers' => array_merge(
+                        array(
+                            'Authorization' => 'Bearer ' . $site_api_key,
+                        ),
+                        array(
+                            'Content-Type' => 'application/json',
+                            'X-Site-URL' => $site_url,
+                            'User-Agent' => 'HeyTrisha-WordPress-Plugin/' . HEYTRISHA_VERSION,
+                        )
                     ),
                     'body' => wp_json_encode($api_update_data),
                     'timeout' => 30,
@@ -3444,6 +5103,9 @@ function heytrisha_ajax_update_personal_data() {
                         $decoded_error = json_decode($response_body, true);
                         if ($decoded_error && isset($decoded_error['message'])) {
                             $error_details = ': ' . $decoded_error['message'];
+                        }
+                        if (403 === (int) $response_code) {
+                            $error_details .= ' If you changed the API Base URL, use the site API key issued for that server.';
                         }
                         $sync_message = 'Settings saved locally but failed to sync with API server (HTTP ' . $response_code . $error_details . ').';
                         // Log for debugging
