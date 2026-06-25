@@ -3,7 +3,7 @@
 
 Plug and Play AI tool - it can be integrated with any applications, MCPs. Wordpress/WooCommerce plugin is available
 
-An intelligent WordPress chatbot plugin that uses OpenAI to convert natural language queries into SQL queries and WordPress REST API requests. Built with React frontend and Laravel backend.
+An intelligent chatbot project that uses OpenAI to convert natural language queries into SQL queries and REST API requests. Built with React frontend and Laravel backend.
 
 ## 📋 Table of Contents
 
@@ -29,8 +29,6 @@ An intelligent WordPress chatbot plugin that uses OpenAI to convert natural lang
 
 ## 📦 Requirements
 
-- WordPress 5.0 or higher
-- WooCommerce (optional, for WooCommerce features)
 - PHP 8.1 or higher
 - MySQL 5.7 or higher
 - Composer (for Laravel dependencies)
@@ -39,7 +37,7 @@ An intelligent WordPress chatbot plugin that uses OpenAI to convert natural lang
 
 ## 🚀 Installation
 
-### Step 1: Install the Plugin
+### Step 1: Install the Plugin (only for wordpress users)
 
 1. Clone or download this repository to your WordPress plugins directory:
    ```bash
@@ -51,7 +49,7 @@ An intelligent WordPress chatbot plugin that uses OpenAI to convert natural lang
    - Find "Hey Trisha Woocommerce Chatbot"
    - Click **Activate**
 
-### Step 2: Install Laravel Dependencies
+### Step 2: Install Laravel Dependencies (for developers)
 
 1. Navigate to the `api` directory:
    ```bash
