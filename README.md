@@ -1,7 +1,7 @@
 # HeyTrisha
 ![HeyTrisha logo.\label{fig:logo}](assets/img/heytrisha.jpeg)
 
-Plug and Play AI tool for Wordpress
+Plug and Play AI tool - it can be integrated with any applications, MCPs. Wordpress/WooCommerce plugin is available
 
 An intelligent WordPress chatbot plugin that uses OpenAI to convert natural language queries into SQL queries and WordPress REST API requests. Built with React frontend and Laravel backend.
 
