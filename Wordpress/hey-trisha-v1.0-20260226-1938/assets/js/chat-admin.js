@@ -1,10 +1,137 @@
+function heytrishaAdminIsSensitiveKey(key) {
+    if (typeof key !== "string" || !key) return false;
+    const l = key.toLowerCase();
+    return ["password", "passwd", "user_pass", "secret", "api_key", "token", "consumer_secret", "cvv", "cvc"].some(function (n) {
+        return l.indexOf(n) !== -1;
+    });
+}
+function heytrishaAdminRedactString(text) {
+    if (typeof text !== "string" || !text) return text;
+    return text
+        .replace(/\$2[ayb]\$[.\/0-9A-Za-z]{50,}/g, "[REDACTED]")
+        .replace(/\$P\$[.\/A-Za-z0-9]{30,}/g, "[REDACTED]")
+        .replace(/\bsk-[a-zA-Z0-9]{10,}\b/g, "[REDACTED]");
+}
+function heytrishaAdminExtractResponseMessage(data) {
+    if (!data || typeof data !== "object") return null;
+    if (data.message && typeof data.message === "string") return data.message;
+    if (data.data && typeof data.data === "object" && typeof data.data.message === "string") return data.data.message;
+    if (data.details && typeof data.details === "string") return data.details;
+    return null;
+}
+function heytrishaAdminRedactPayload(data) {
+    if (data == null) return data;
+    if (typeof data === "string") return heytrishaAdminRedactString(data);
+    if (Array.isArray(data)) return data.map(heytrishaAdminRedactPayload);
+    if (typeof data === "object") {
+        const o = {};
+        Object.keys(data).forEach(function (k) {
+            if (heytrishaAdminIsSensitiveKey(k) || k === "sql" || k === "sql_query") return;
+            o[k] = heytrishaAdminRedactPayload(data[k]);
+        });
+        return o;
+    }
+    return data;
+}
+
+function heytrishaAdminBuildConversationHistory(messageList, maxTurns) {
+    const limit = maxTurns == null ? 20 : maxTurns;
+    if (!Array.isArray(messageList) || messageList.length === 0) {
+        return [];
+    }
+    const turns = [];
+    messageList.forEach(function (m) {
+        if (!m) return;
+        const role = m.role === "user" ? "user" : "assistant";
+        const text = (m.content || "").trim();
+        if (!text) return;
+        turns.push({ role: role, content: text });
+    });
+    if (turns.length > limit) {
+        return turns.slice(-limit);
+    }
+    return turns;
+}
+
+function heytrishaAdminSendIconSvg(size) {
+    var s = size == null ? 18 : size;
+    return React.createElement(
+        "span",
+        { className: "heytrisha-send-icon", style: { display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 0, verticalAlign: "middle" } },
+        React.createElement("svg", {
+            width: s,
+            height: s,
+            viewBox: "0 0 24 24",
+            fill: "currentColor",
+            xmlns: "http://www.w3.org/2000/svg",
+            "aria-hidden": "true",
+            focusable: "false"
+        },
+            React.createElement("path", { d: "M2.01 21L23 12 2.01 3 2 10l15 2-15 2v7z" })
+        )
+    );
+}
+
+function heytrishaUiIconWrap(svgNode, size) {
+    var s = size == null ? 18 : size;
+    return React.createElement(
+        "span",
+        {
+            className: "heytrisha-ui-icon",
+            style: {
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 0,
+                width: s + "px",
+                height: s + "px",
+                flexShrink: 0,
+                color: "currentColor"
+            }
+        },
+        svgNode
+    );
+}
+function heytrishaSvgPathIcon(size, pathD, viewBox) {
+    var s = size == null ? 18 : size;
+    var vb = viewBox || "0 0 24 24";
+    return heytrishaUiIconWrap(
+        React.createElement(
+            "svg",
+            {
+                width: s,
+                height: s,
+                viewBox: vb,
+                fill: "currentColor",
+                xmlns: "http://www.w3.org/2000/svg",
+                "aria-hidden": "true",
+                focusable: "false"
+            },
+            React.createElement("path", { d: pathD })
+        ),
+        s
+    );
+}
+function heytrishaChartBarIcon(size) {
+    return heytrishaSvgPathIcon(size, "M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2v-7h-2v7zm4 0h2V11h-2v8z");
+}
+function heytrishaPlusIcon(size) {
+    return heytrishaSvgPathIcon(size, "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z");
+}
+function heytrishaChevronRightIcon(size) {
+    return heytrishaSvgPathIcon(size, "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z");
+}
+function heytrishaMenuIcon(size) {
+    return heytrishaSvgPathIcon(size, "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z");
+}
+
 document.addEventListener("DOMContentLoaded", function () {
     const root = document.getElementById("heytrisha-chat-admin-root");
     if (!root) return;
 
     const config = window.heytrishaChatConfig || {};
     // Destructure both REST nonce and chatbot (admin-ajax) nonce
-    const { pluginUrl, ajaxurl, chatId, restUrl, nonce, chatbotNonce } = config;
+    const { pluginUrl, ajaxurl, chatId, restUrl, nonce, chatbotNonce, hybridArchitecture } = config;
 
     const ChatAdmin = () => {
         const [chats, setChats] = React.useState([]);
@@ -14,8 +141,42 @@ document.addEventListener("DOMContentLoaded", function () {
         const [isLoading, setIsLoading] = React.useState(false);
         const [isTyping, setIsTyping] = React.useState(false);
         const [sidebarOpen, setSidebarOpen] = React.useState(true);
-        const messagesEndRef = React.useRef(null);
+        const [hybridEnabled, setHybridEnabled] = React.useState(!!hybridArchitecture);
+        const [hybridSaving, setHybridSaving] = React.useState(false);
+        const messagesScrollRef = React.useRef(null);
         const inputRef = React.useRef(null);
+
+        const saveHybridArchitecture = async (enabled) => {
+            const ajaxUrl = ajaxurl || "/wp-admin/admin-ajax.php";
+            const formData = new FormData();
+            formData.append("action", "heytrisha_update_hybrid_architecture");
+            formData.append("hybrid_architecture", enabled ? "1" : "0");
+            if (chatbotNonce || nonce) {
+                formData.append("nonce", chatbotNonce || nonce);
+            }
+            const response = await fetch(ajaxUrl, { method: "POST", body: formData });
+            const data = await response.json();
+            if (!data || !data.success) {
+                throw new Error(
+                    (data && data.data && data.data.message) ? data.data.message : "Failed to save hybrid setting"
+                );
+            }
+        };
+
+        const handleHybridToggle = async () => {
+            if (hybridSaving) return;
+            const next = !hybridEnabled;
+            setHybridEnabled(next);
+            setHybridSaving(true);
+            try {
+                await saveHybridArchitecture(next);
+            } catch (err) {
+                setHybridEnabled(!next);
+                console.error("Failed to update hybrid architecture:", err);
+            } finally {
+                setHybridSaving(false);
+            }
+        };
 
         // Load chats on mount
         React.useEffect(() => {
@@ -27,10 +188,26 @@ document.addEventListener("DOMContentLoaded", function () {
             }
         }, []);
 
-        // Auto-scroll to bottom
+        // Pin to bottom inside the messages pane only (scrollIntoView scrolls the WP admin page)
         React.useEffect(() => {
-            messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            const el = messagesScrollRef.current;
+            if (!el) return;
+            const run = () => {
+                el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            };
+            const id = window.requestAnimationFrame(run);
+            return () => window.cancelAnimationFrame(id);
         }, [messages, isTyping]);
+
+        // Auto-grow textarea + keep pinned to bottom while typing
+        React.useEffect(() => {
+            const el = inputRef.current;
+            if (!el) return;
+            // Reset to shrink, then expand to content
+            el.style.height = "auto";
+            const next = Math.min(el.scrollHeight, 200);
+            el.style.height = `${next}px`;
+        }, [inputText]);
 
         // Load chats list
         const loadChats = async () => {
@@ -170,6 +347,7 @@ document.addEventListener("DOMContentLoaded", function () {
             if (!inputText.trim() || isTyping) return;
 
             const userMessage = inputText.trim();
+            const conversationHistoryForApi = heytrishaAdminBuildConversationHistory(messages);
             setInputText("");
             
             // If no current chat, create one
@@ -222,6 +400,12 @@ document.addEventListener("DOMContentLoaded", function () {
                 formData.append('action', 'heytrisha_query');
                 formData.append('endpoint', 'query');
                 formData.append('query', userMessage);
+                if (chat && chat.id) {
+                    formData.append('chat_id', String(chat.id));
+                }
+                if (conversationHistoryForApi.length > 0) {
+                    formData.append('conversation_history', JSON.stringify(conversationHistoryForApi));
+                }
 
                 // ✅ Include security nonce expected by heytrisha_ajax_query_handler()
                 // Prefer dedicated chatbotNonce, fall back to REST nonce if needed
@@ -234,13 +418,17 @@ document.addEventListener("DOMContentLoaded", function () {
                     body: formData // FormData automatically sets Content-Type with boundary
                 });
 
-                const aiData = await aiResponse.json();
+                let aiData = await aiResponse.json();
+                if (aiData && typeof aiData === "object") {
+                    if (aiData.message) aiData.message = heytrishaAdminRedactString(aiData.message);
+                    if (aiData.data !== undefined && aiData.data !== null) aiData.data = heytrishaAdminRedactPayload(aiData.data);
+                }
                 let assistantContent = '';
                 let formattedData = null;
                 
                 if (aiData.success) {
                     // Use the friendly message from API if available
-                    assistantContent = aiData.message || 'Here\'s what I found:';
+                    assistantContent = heytrishaAdminExtractResponseMessage(aiData) || aiData.message || 'Here\'s what I found:';
                     
                     // Format the data for display
                     if (aiData.data && Array.isArray(aiData.data) && aiData.data.length > 0) {
@@ -249,7 +437,7 @@ document.addEventListener("DOMContentLoaded", function () {
                         formattedData = formatDataForDisplay([aiData.data]);
                     }
                 } else {
-                    assistantContent = aiData.message || 'Sorry, something went wrong. Please try again.';
+                    assistantContent = heytrishaAdminExtractResponseMessage(aiData) || 'Sorry, I could not process that request. Please try again.';
                 }
 
                 // Add assistant message
@@ -290,9 +478,15 @@ document.addEventListener("DOMContentLoaded", function () {
                 }
             } catch (error) {
                 console.error('Failed to get AI response:', error);
+                let errText = error.message || 'Sorry, something went wrong. Please try again.';
+                if (error.message && (error.message.includes('timeout') || error.message.includes('Timeout'))) {
+                    errText = 'Sorry, the server took too long to respond. Please try again in a moment.';
+                } else if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+                    errText = 'Sorry, could not connect to the server. Please check your API configuration in HeyTrisha settings.';
+                }
                 const errorMsg = {
                     role: 'assistant',
-                    content: 'Sorry, something went wrong. Please try again.',
+                    content: errText,
                     metadata: { error: error.message }
                 };
                 setMessages(prev => [...prev, errorMsg]);
@@ -348,7 +542,7 @@ document.addEventListener("DOMContentLoaded", function () {
                             gap: "6px"
                         }
                     },
-                        React.createElement("span", null, "📊"),
+                        heytrishaChartBarIcon(16),
                         React.createElement("span", null, formattedData.summary)
                     ),
                     React.createElement("div", {
@@ -432,7 +626,7 @@ document.addEventListener("DOMContentLoaded", function () {
         };
 
         // Handle Enter key
-        const handleKeyPress = (e) => {
+        const handleKeyDown = (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
@@ -451,7 +645,7 @@ document.addEventListener("DOMContentLoaded", function () {
                             className: "heytrisha-new-chat-btn",
                             onClick: createNewChat
                         },
-                            React.createElement("span", null, "➕"),
+                            heytrishaPlusIcon(16),
                             React.createElement("span", null, "New Chat")
                         )
                     ),
@@ -463,7 +657,7 @@ document.addEventListener("DOMContentLoaded", function () {
                                 onClick: () => loadChat(chat.id)
                             },
                                 React.createElement("span", { className: "heytrisha-chat-item-title" }, chat.title),
-                                React.createElement("span", null, "→")
+                                heytrishaChevronRightIcon(18)
                             )
                         )
                     )
@@ -471,13 +665,34 @@ document.addEventListener("DOMContentLoaded", function () {
                 // Chat content area
                 React.createElement("div", { className: "heytrisha-chat-content" },
                 React.createElement("div", { className: "heytrisha-chat-header" },
-                    React.createElement("button", {
-                        className: "heytrisha-sidebar-toggle",
-                        onClick: () => setSidebarOpen(!sidebarOpen)
-                    }, "☰"),
-                    React.createElement("h1", null, currentChat?.title || "New Chat")
+                    React.createElement("div", { className: "heytrisha-chat-header-start" },
+                        React.createElement("button", {
+                            type: "button",
+                            className: "heytrisha-sidebar-toggle",
+                            "aria-label": sidebarOpen ? "Hide chat list" : "Show chat list",
+                            onClick: () => setSidebarOpen(!sidebarOpen)
+                        }, heytrishaMenuIcon(20)),
+                        React.createElement("h1", null, currentChat?.title || "New Chat")
+                    ),
+                    React.createElement("label", {
+                        className: "heytrisha-hybrid-toggle" + (hybridSaving ? " is-saving" : ""),
+                        title: "Strict DB-then-web pipeline: store data first, then open-web enrichment. Reporting questions stay on fast local SQL."
+                    },
+                        React.createElement("span", { className: "heytrisha-hybrid-toggle-label" }, "Hybrid"),
+                        React.createElement("input", {
+                            type: "checkbox",
+                            className: "heytrisha-hybrid-toggle-input",
+                            checked: hybridEnabled,
+                            disabled: hybridSaving,
+                            onChange: handleHybridToggle,
+                            "aria-label": "Hybrid architecture"
+                        }),
+                        React.createElement("span", { className: "heytrisha-hybrid-toggle-track", "aria-hidden": "true" },
+                            React.createElement("span", { className: "heytrisha-hybrid-toggle-thumb" })
+                        )
+                    )
                 ),
-                React.createElement("div", { className: "heytrisha-chat-messages" },
+                React.createElement("div", { className: "heytrisha-chat-messages", ref: messagesScrollRef },
                     messages.length === 0 && !isLoading ? 
                         React.createElement("div", { className: "heytrisha-empty-state" },
                             React.createElement("h2", null, "Hey Trisha"),
@@ -515,8 +730,7 @@ document.addEventListener("DOMContentLoaded", function () {
                                     React.createElement("div", { className: "heytrisha-typing-dot" })
                                 )
                             )
-                        ),
-                    React.createElement("div", { ref: messagesEndRef })
+                        )
                 ),
                 React.createElement("div", { className: "heytrisha-chat-input-container" },
                     React.createElement("div", { className: "heytrisha-chat-input-wrapper" },
@@ -525,15 +739,17 @@ document.addEventListener("DOMContentLoaded", function () {
                             className: "heytrisha-chat-input",
                             value: inputText,
                             onChange: (e) => setInputText(e.target.value),
-                            onKeyPress: handleKeyPress,
+                            onKeyDown: handleKeyDown,
                             placeholder: "Type a message...",
                             rows: 1
                         }),
                         React.createElement("button", {
+                            type: "button",
+                            "aria-label": "Send message",
                             className: "heytrisha-chat-send-btn",
                             onClick: sendMessage,
                             disabled: !inputText.trim() || isTyping
-                        }, "→")
+                        }, heytrishaAdminSendIconSvg(18))
                     )
                 ),
                 React.createElement("div", { className: "heytrisha-chat-footer" },

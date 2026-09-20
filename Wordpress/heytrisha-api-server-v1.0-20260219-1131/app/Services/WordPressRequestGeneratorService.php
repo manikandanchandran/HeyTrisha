@@ -563,7 +563,7 @@ class WordPressRequestGeneratorService
     //     }
     // }
 
-    public function generateWordPressRequest($userQuery)
+    public function generateWordPressRequest($userQuery, string $openaiKey = '')
     {
         $prompt = "
         You are an AI assistant that generates WordPress REST API requests based on user input.
@@ -585,11 +585,11 @@ class WordPressRequestGeneratorService
         ";
 
         try {
-            // ✅ Get OpenAI API key from WordPress config
-            $apiKey = $this->configService->getOpenAIApiKey();
-            if (!$apiKey) {
+            // Use the plugin-supplied key only (never .env)
+            $apiKey = $openaiKey;
+            if (empty($apiKey)) {
                 Log::error("🚨 OpenAI API Key is missing!");
-                return ['error' => 'OpenAI API Key is missing. Please set it in the WordPress admin settings.'];
+                return ['error' => 'OpenAI API Key is missing. Please set it in the HeyTrisha plugin settings and save.'];
             }
 
             // ✅ Send request to OpenAI API

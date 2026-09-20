@@ -1,5 +1,10 @@
 /* Hey Trisha Chats List */
 
+.wrap:has(#heytrisha-chats-list-root) {
+    position: relative;
+    z-index: auto;
+}
+
 #heytrisha-chats-list-root {
     margin-top: 20px;
 }

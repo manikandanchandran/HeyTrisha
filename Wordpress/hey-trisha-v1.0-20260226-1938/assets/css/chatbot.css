@@ -44,6 +44,11 @@
     background: #94a3b8;
 }
 
+/* Send icon: vector SVG, aligned with no stray baseline gap */
+.heytrisha-send-icon svg {
+    display: block;
+}
+
 /* Message Animation */
 .heytrisha-chatbot-message {
     animation: fadeInUp 0.4s ease-out;
@@ -60,4 +65,8 @@
 
 .heytrisha-chatbot-typing-dot:nth-child(3) {
     animation-delay: 0.4s;
+}
+
+.heytrisha-ui-icon svg {
+    display: block;
 }

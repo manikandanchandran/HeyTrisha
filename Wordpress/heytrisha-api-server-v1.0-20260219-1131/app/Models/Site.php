@@ -44,9 +44,9 @@ class Site extends Model
     ];
 
     /**
-     * Get decrypted OpenAI API key
+     * Decrypt this site's OpenAI API key (encrypted at rest with APP_KEY via Crypt::encryptString).
      *
-     * @return string
+     * @return string|null
      */
     public function getOpenAIKey()
     {
@@ -61,7 +61,7 @@ class Site extends Model
     }
 
     /**
-     * Set encrypted OpenAI API key
+     * Encrypt and store this site's OpenAI API key (never shared across sites).
      *
      * @param string $key
      * @return void

@@ -1,10 +1,15 @@
 === Hey Trisha ===
-Contributors: mahakris123
+Contributors: Manikandan Chandran - Founder, Architect & Lead Developer,
+              Keerthana Kalidoss - Lead,
+              Maha Krishnan S - Lead, 
+              Ashwin B A,
+              Ramasamy T, 
+              Rohit Kumar S.
 Tags: chatbot, ai, openai, woocommerce, nlp
 Requires at least: 5.0
 Tested up to: 6.9
 Requires PHP: 7.4.3
-Stable tag: 2.1.7
+Stable tag: 2.2.0
 License: MIT
 License URI: https://opensource.org/licenses/MIT
 Text Domain: hey-trisha
@@ -24,6 +29,9 @@ Hey Trisha is an intelligent AI-powered chatbot for WordPress and WooCommerce th
 * 🔒 **Secure** - Administrator-only access with proper authentication
 * 🌐 **Shared Hosting Compatible** - Works on any WordPress hosting environment
 * ⚡ **Fast** - Optimized for performance with smart caching
+* 📁 **Knowledge & Schema Specification** - Upload text, CSV, SQL, or JSON files to constrain AI answers to your data model
+* 🔐 **Read-Only Analytics** - SQL queries are validated server-side; destructive write/delete intents are blocked in chat
+* 🧠 **Hybrid Architecture** - Optional hybrid routing for richer answers (enable per chat from the admin UI)
 
 = How It Works =
 
@@ -136,6 +144,17 @@ The AI will provide a helpful response and suggest what kinds of questions you c
 
 == Changelog ==
 
+= 2.2.0 - 2026-05-28 =
+* NEW: Knowledge & Schema Specification — upload .txt, .md, .csv, .log, .sql, or .json files on the settings page to index business rules and constrain AI answers
+* NEW: Schema Manager — stores uploaded specifications, syncs with the HeyTrisha API ingest endpoint, and tracks specification version and allowlist
+* NEW: Read-only SQL validation — analytics queries must be SELECT/WITH/SHOW/DESCRIBE/EXPLAIN; write operations are rejected before execution
+* NEW: User-facing chat error messages — clearer, consistent feedback for blocked intents, sensitive tables, and API errors
+* NEW: Hybrid architecture toggle — enable or disable hybrid routing per chat from the New Chat admin screen
+* IMPROVED: Effective schema resolution — uploaded schema, live database tables, and specification allowlists are combined intelligently per query
+* IMPROVED: Asset cache busting — CSS/JS versions use file modification time so updates apply reliably after upgrading
+* IMPROVED: Chat admin UI styling and hybrid toggle control
+* SECURITY: Blocks natural-language delete/write database intents and sensitive system tables from analytics queries
+
 = 2.1.3 - 2026-02-26 =
 * CHANGED: Email, First Name, and Last Name fields are now fully editable
 * IMPROVED: Users can now update their email, first name, and last name from the settings page
@@ -207,6 +226,9 @@ The AI will provide a helpful response and suggest what kinds of questions you c
 
 == Upgrade Notice ==
 
+= 2.2.0 =
+Recommended update: adds Knowledge & Schema Specification uploads, read-only SQL safety, hybrid architecture toggle, and improved chat error messages. After upgrading, review Settings to upload a specification file if you use custom data rules.
+
 = 2.1.3 =
 NEW FEATURE: Email, First Name, and Last Name fields are now editable. You can update these fields from the settings page.
 
@@ -268,7 +290,8 @@ The plugin sends the following information to the API service:
 - During initial plugin setup (one-time credential registration)
 - Each time you submit a question via the chatbot interface
 - When updating plugin settings
-- NO automatic or background transmissions occur
+- When uploading a Knowledge & Schema Specification file (file contents are sent to the API for indexing)
+- NO other automatic or background transmissions occur
 
 **Service Terms & Privacy:**
 - Terms of Service: https://heytrisha.com/terms-of-service
@@ -288,13 +311,12 @@ This plugin transmits data to the HeyTrisha external service. Please review the 
 == Support ==
 
 For support, please visit:
-* [GitHub Repository](https://github.com/mahakris123/HeyTrisha)
-* [Report Issues](https://github.com/mahakris123/HeyTrisha/issues)
-* [Documentation](https://github.com/mahakris123/HeyTrisha#readme)
+* [GitHub Repository](https://github.com/manikandanchandran/HeyTrisha)
+* [Report Issues](https://github.com/manikandanchandran/HeyTrisha/issues)
+* [Documentation](https://github.com/manikandanchandran/HeyTrisha#readme)
 
 == Credits ==
 
-Developed by mahakris123
 Built with Laravel, React, and OpenAI
 
 == License ==

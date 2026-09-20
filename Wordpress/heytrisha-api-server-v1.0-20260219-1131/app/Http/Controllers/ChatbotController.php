@@ -6,6 +6,10 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use App\Services\WordPressConfigService;
+use App\Support\OpenAiKeyResolver;
+use App\Support\ChatErrorMessages;
+use App\Support\SearchSynonyms;
+use App\Support\SqlReadOnlyValidator;
 use OpenAI;
 
 class ChatbotController extends Controller
@@ -42,7 +46,7 @@ class ChatbotController extends Controller
     /**
      * Generate SQL query using ChatGPT.
      */
-    private function queryChatGPTForSql($userQuery, $schema)
+    private function queryChatGPTForSql($userQuery, $schema, string $openaiKey = '')
     {
         $schemaStr = collect($schema)
             ->map(fn ($columns, $table) => "Table: $table, Columns: " . implode(', ', $columns))
@@ -54,20 +58,25 @@ $schemaStr
 
 User Query: $userQuery
 
+SECURITY & PRIVACY RULES:
+- Only generate MySQL SELECT queries.
+- Never query or reference sensitive tables/columns such as: users, usermeta, options, woocommerce_payment_tokens, woocommerce_payment_tokenmeta, woocommerce_api_keys, woocommerce_sessions, user_pass, password, secret, token, api_key.
+- If the user asks for secrets/passwords/cards, return a safe analytics query (aggregates) or a SELECT that returns 0 rows.
+
 Output only the SQL query. Do not include explanations, context, or any other text. Strictly return the SQL query itself.
 EOD;
 
         try {
-            $apiKey = $this->configService->getOpenAIApiKey();
-            if (!$apiKey) {
+            $apiKey = $openaiKey;
+            if (empty($apiKey)) {
                 Log::error("OpenAI API Key is missing!");
-                return ['error' => 'OpenAI API Key is missing. Please configure it in WordPress admin settings.'];
+                return ['error' => 'OpenAI API Key is missing. Please configure it in the HeyTrisha plugin settings and save.'];
             }
             
             $response = OpenAI::client($apiKey)->chat()->create([
                 'model' => 'gpt-4',
                 'messages' => [
-                    ['role' => 'system', 'content' => 'You are a SQL query assistant. Your task is to generate SQL queries.'],
+                    ['role' => 'system', 'content' => 'You generate safe MySQL SELECT queries for analytics. Never return secrets or access sensitive tables. Output SQL only.'],
                     ['role' => 'user', 'content' => $prompt],
                 ],
             ]);
@@ -87,13 +96,25 @@ EOD;
     private function executeSqlQuery($sqlQuery)
     {
         try {
-            if (str_starts_with(strtolower($sqlQuery), 'select')) {
-                $result = DB::select($sqlQuery);
-                return $result ?: ['message' => 'No results found.'];
-            } else {
-                $rowsAffected = DB::statement($sqlQuery);
-                return ['status' => 'success', 'rows_affected' => $rowsAffected];
+            $validation = SqlReadOnlyValidator::validate($sqlQuery);
+            if (!$validation['valid']) {
+                return ['error' => ChatErrorMessages::fromSqlValidation($validation)];
             }
+
+            // Defense-in-depth: block obvious sensitive tables.
+            $normalized = strtolower(trim($sqlQuery));
+            $blocked = [' users', ' usermeta', ' options', ' woocommerce_payment_tokens', ' woocommerce_payment_tokenmeta', ' woocommerce_api_keys', ' woocommerce_sessions'];
+            foreach ($blocked as $marker) {
+                if (strpos($normalized, $marker) !== false) {
+                    return ['error' => ChatErrorMessages::sensitiveTable()];
+                }
+            }
+
+            $result = DB::select($sqlQuery);
+            if ($result === []) {
+                return ['message' => ChatErrorMessages::emptyQueryResults('', $sqlQuery)];
+            }
+            return $result;
         } catch (\Exception $e) {
             Log::error("SQL Execution Error: " . $e->getMessage());
             return ['error' => $e->getMessage()];
@@ -111,6 +132,13 @@ EOD;
                 return response()->json(['error' => 'No query provided'], 400);
             }
 
+            // Resolve OpenAI key from plugin header or site DB (never .env)
+            $site = $request->get('site');
+            $openaiKey = $site ? OpenAiKeyResolver::forPluginRequest($request, $site) : null;
+            if (empty($openaiKey)) {
+                return response()->json(['error' => 'OpenAI API Key is not configured. Please set it in the HeyTrisha plugin settings and save.'], 500);
+            }
+
             // Fetch schema
             $schema = $this->getDbSchema();
             if (isset($schema['error'])) {
@@ -118,7 +146,7 @@ EOD;
             }
 
             // Generate SQL query
-            $sqlQuery = $this->queryChatGPTForSql($userQuery, $schema);
+            $sqlQuery = $this->queryChatGPTForSql($userQuery, $schema, $openaiKey);
             if (isset($sqlQuery['error'])) {
                 return response()->json(['error' => $sqlQuery['error']], 500);
             }

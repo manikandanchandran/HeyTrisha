@@ -67,6 +67,9 @@ use App\Services\WordPressApiService;
 use App\Services\WordPressRequestGeneratorService; // ✅ Add new service
 use App\Services\PostProductSearchService; // ✅ Add search service
 use App\Services\WordPressConfigService; // ✅ Add config service
+use App\Support\OpenAiKeyResolver;
+use App\Support\ChatErrorMessages;
+use App\Support\SqlTextSearchBroadener;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -286,6 +289,14 @@ class NLPController extends Controller
         
         // ✅ Normalize query (trim whitespace)
         $userQuery = trim($userQuery);
+
+        $blockedIntent = \App\Support\ChatErrorMessages::blockedIntentFromQuery($userQuery);
+        if ($blockedIntent !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => $blockedIntent,
+            ], 400);
+        }
         
         Log::info("📥 Received query: '{$userQuery}'");
 
@@ -311,7 +322,7 @@ class NLPController extends Controller
                             // Verify get_rejection_message exists
                             $rejection_msg = method_exists($securityFilterClass, 'get_rejection_message') 
                                 ? call_user_func(array($securityFilterClass, 'get_rejection_message'))
-                                : "I'm designed to help with data analytics and insights, but I can't access or display sensitive personal information like passwords, emails, or contact details. This protects user privacy and security.";
+                                : \App\Support\ChatErrorMessages::sensitiveDataAccess();
                             
                             Log::warning("🚨 BLOCKED sensitive query: '{$userQuery}'");
                             
@@ -319,7 +330,6 @@ class NLPController extends Controller
                                 'success' => true,
                                 'data' => null,
                                 'message' => $rejection_msg,
-                                'sql_query' => null
                             ]);
                         }
                     }
@@ -353,8 +363,7 @@ class NLPController extends Controller
                         return response()->json([
                             'success' => true,
                             'data' => null,
-                            'message' => "I'm designed to help with data analytics and insights, but I can't access or display sensitive personal information like passwords, emails, or contact details. This protects user privacy and security.",
-                            'sql_query' => null
+                            'message' => \App\Support\ChatErrorMessages::sensitiveDataAccess(),
                         ]);
                     }
                 }
@@ -402,29 +411,22 @@ class NLPController extends Controller
 
             // ✅ Handle creative queries (SEO keywords, recommendations, suggestions, etc.)
             if ($isCreativeQuery) {
-                return $this->handleCreativeQuery($userQuery);
+                return $this->handleCreativeQuery($userQuery, $openaiKey);
             }
 
             // ✅ If the query is a fetch operation, use NLP with OpenAI
             if ($isFetch) {
                 Log::info("🤖 NLP Flow: Detected fetch operation");
                 
-                // Check if OpenAI API key is configured (from WordPress database)
-                try {
-                    $openaiKey = $this->configService->getOpenAIApiKey();
-                    if (empty($openaiKey)) {
-                        return response()->json([
-                            'success' => false,
-                            'message' => 'OpenAI API Key is not configured. Please set it in the Hey Trisha Chatbot settings page.'
-                        ], 500);
-                    }
-                } catch (\Exception $e) {
-                    Log::error("❌ Error getting OpenAI API key: " . $e->getMessage());
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Configuration error. Please check your WordPress settings.'
-                    ], 500);
-                }
+            // Resolve the OpenAI key from the plugin header or the site DB row (never .env)
+            $site = $request->get('site');
+            $openaiKey = $site ? OpenAiKeyResolver::forPluginRequest($request, $site) : null;
+            if (empty($openaiKey)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => \App\Support\ChatErrorMessages::openAiNotConfigured()
+                ], 500);
+            }
 
                 // ✅ Step 1: Get intelligent database schema
                 // Analyzes query to include relevant tables (reduces tokens while maintaining NLP)
@@ -443,7 +445,7 @@ class NLPController extends Controller
                     Log::error("❌ Stack trace: " . $e->getTraceAsString());
                     return response()->json([
                         'success' => false,
-                        'message' => 'Database connection error. Please check your database settings.'
+                        'message' => \App\Support\ChatErrorMessages::databaseConnection(),
                     ], 500);
                 }
 
@@ -601,6 +603,52 @@ class NLPController extends Controller
                                 'message' => $userFriendlyError
                             ], 500);
                         }
+                    }
+                    // Table/column error on a product / stock / inventory query:
+                    // recover with a correct stock-aware query, then a broad product catalog query,
+                    // instead of returning an error message.
+                    elseif (($isTableNotFound || $isColumnError)
+                        && ($isProductQuery || preg_match('/\b(stock|inventory|product|products|item|items|catalog|available)\b/i', $queryLower))
+                        && is_array($schema)) {
+                        Log::info("🔄 Table/column error on product/stock query — trying catalog fallback SQL...");
+                        Log::info("🔄 Raw Error: " . $rawError);
+
+                        $retrySqls = array_filter([
+                            SqlTextSearchBroadener::buildStockProductSearchSql($schema, $userQuery),
+                            SqlTextSearchBroadener::buildFuzzyProductSearchSql($userQuery, $schema),
+                            SqlTextSearchBroadener::buildListProductsSql($schema),
+                        ]);
+
+                        $recovered = false;
+                        foreach ($retrySqls as $retrySql) {
+                            $retryResult = $this->mysqlService->executeSQLQuery($retrySql);
+                            if (!is_array($retryResult) || isset($retryResult['error']) || isset($retryResult['message'])) {
+                                continue;
+                            }
+                            $hasRetryRows = isset($retryResult[0]);
+                            if (!$hasRetryRows) {
+                                foreach ($retryResult as $rk => $rv) {
+                                    if (is_numeric($rk)) {
+                                        $hasRetryRows = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ($hasRetryRows) {
+                                Log::info('✅ Product/stock fallback found ' . count($retryResult) . ' results');
+                                $result   = $retryResult;
+                                $sqlQuery = $retrySql;
+                                $recovered = true;
+                                break;
+                            }
+                        }
+
+                        if (!$recovered) {
+                            return response()->json([
+                                'success' => false,
+                                'message' => $userFriendlyError
+                            ], 500);
+                        }
                     } else {
                         // Return user-friendly error message
                         return response()->json([
@@ -616,7 +664,6 @@ class NLPController extends Controller
                     return response()->json([
                         'success' => false,
                         'message' => "Invalid data format returned from database.",
-                        'sql_query' => $sqlQuery
                     ], 500);
                 }
                 
@@ -632,7 +679,7 @@ class NLPController extends Controller
                     $hasDataRows = false;
                 } elseif (empty($result)) {
                     // Truly empty array
-                    $noDataMessage = "I couldn't find any data matching your request.";
+                    $noDataMessage = ChatErrorMessages::emptyQueryResults($userQuery, $sqlQuery);
                     $hasDataRows = false;
                 } else {
                     // Check if result has numeric keys (actual data rows)
@@ -677,30 +724,53 @@ class NLPController extends Controller
                             }
                         }
                     }
+
+                    // Product/category: retry with broad LIKE search when exact filters return nothing
+                    $isProductOrCategoryQuery = (bool) preg_match(
+                        '/\b(product|products|item|items|category|categories|categor|sku|catalog|stock|homam|puja|service|available)\b/i',
+                        $queryLower
+                    );
+
+                    if (!$hasDataRows && $isProductOrCategoryQuery && is_array($schema)) {
+                        $retrySqls = array_filter([
+                            SqlTextSearchBroadener::buildFuzzyProductSearchSql($userQuery, $schema),
+                            SqlTextSearchBroadener::buildListProductsSql($schema),
+                        ]);
+                        foreach ($retrySqls as $fuzzySql) {
+                            Log::info('🔄 Primary query returned 0 rows; trying product catalog fallback SQL');
+                            $fuzzyResult = $this->mysqlService->executeSQLQuery($fuzzySql);
+                            if (!is_array($fuzzyResult) || isset($fuzzyResult['error']) || isset($fuzzyResult['message'])) {
+                                continue;
+                            }
+                            $hasFuzzyRows = false;
+                            foreach ($fuzzyResult as $key => $value) {
+                                if (is_numeric($key)) {
+                                    $hasFuzzyRows = true;
+                                    break;
+                                }
+                            }
+                            if ($hasFuzzyRows || isset($fuzzyResult[0])) {
+                                Log::info('✅ Product catalog fallback found ' . count($fuzzyResult) . ' results');
+                                $result      = $fuzzyResult;
+                                $hasDataRows = true;
+                                $sqlQuery    = $fuzzySql;
+                                break;
+                            }
+                        }
+                    }
                     
                     // If still no data rows after fallback attempt, return error message
                     if (!$hasDataRows) {
-                        $message = $noDataMessage ?: "I couldn't find any data matching your request. Please check if the data exists or try rephrasing your question.";
+                        $message = $noDataMessage ?: ChatErrorMessages::emptyQueryResults($userQuery, $sqlQuery);
                         Log::info("ℹ️ No data rows found in result. Message: " . $message);
                         Log::info("ℹ️ SQL Query: " . $sqlQuery);
                         Log::info("ℹ️ User Query: " . $userQuery);
                         Log::info("ℹ️ Result structure: " . json_encode($result));
                         
-                        // ✅ For order queries, provide more helpful message
-                        if ($isOrderQuery) {
-                            $message = "I couldn't find any orders matching your request. This could mean:\n" .
-                                       "1. There are no orders in your database yet\n" .
-                                       "2. The orders are stored in a different table than expected\n" .
-                                       "3. The query needs to be rephrased\n\n" .
-                                       "SQL Query attempted: " . $sqlQuery;
-                            Log::warning("⚠️ Order query returned no results. SQL: " . $sqlQuery);
-                        }
-                        
                         return response()->json([
                             'success' => true,
                             'data' => [],
                             'message' => $message,
-                            'sql_query' => $sqlQuery
                         ]);
                     }
                 }
@@ -730,10 +800,13 @@ class NLPController extends Controller
                     Log::warning('Security filter result filtering fatal error: ' . $e->getMessage());
                     // Continue with unfiltered results (better than failing completely)
                 }
+
+                // Defense-in-depth: always apply a fallback redaction pass.
+                $result = $this->redactSensitiveResultsFallback($result);
                 
                 // ✅ Step 7: Analyze results and generate human-friendly response
                 try {
-                    $analysis = $this->analyzeResultsAndGenerateResponse($userQuery, $result, $sqlQuery);
+                    $analysis = $this->analyzeResultsAndGenerateResponse($userQuery, $result, $sqlQuery, $openaiKey);
                 } catch (\Exception $e) {
                     Log::error("⚠️ Error in analysis: " . $e->getMessage());
                     // Fallback to simple message if analysis fails
@@ -754,7 +827,6 @@ class NLPController extends Controller
                     'data' => $result,
                     'message' => $message, // Human-friendly response
                     'analysis' => $analysis['analysis'] ?? null, // Detailed analysis
-                    'sql_query' => $sqlQuery // Include SQL for transparency
                 ]);
             } else {
                 // ✅ Check if this is an edit operation by name
@@ -775,7 +847,7 @@ class NLPController extends Controller
 
                     // ✅ Generate the API request with the found ID
                     $modifiedQuery = $this->replaceNameWithId($userQuery, $editInfo['name'], $foundItem['id'], $foundItem['type']);
-                    $apiRequest = $this->wordpressRequestGeneratorService->generateWordPressRequest($modifiedQuery);
+                    $apiRequest = $this->wordpressRequestGeneratorService->generateWordPressRequest($modifiedQuery, $openaiKey);
                     
                     if (isset($apiRequest['error'])) {
                         return response()->json(['success' => false, 'message' => $apiRequest['error']], 500);
@@ -804,7 +876,7 @@ class NLPController extends Controller
                     // ✅ Check if this is a WordPress API operation (create, update, delete)
                 if ($this->isWordPressApiOperation($userQuery)) {
                     // ✅ Standard flow for ID-based or create operations
-                    $apiRequest = $this->wordpressRequestGeneratorService->generateWordPressRequest($userQuery);
+                    $apiRequest = $this->wordpressRequestGeneratorService->generateWordPressRequest($userQuery, $openaiKey);
                     
                     if (!is_array($apiRequest) || !isset($apiRequest['method']) || !isset($apiRequest['endpoint'])) {
                         Log::error("❌ Invalid API Request Structure. Missing 'method' or 'endpoint'.");
@@ -840,23 +912,9 @@ class NLPController extends Controller
             Log::error("🚨 Error handling user query: " . $e->getMessage());
             Log::error("🚨 Stack trace: " . $e->getTraceAsString());
             
-            // Return user-friendly error message
-            $errorMessage = "Sorry, I encountered an error processing your request. ";
-            
-            // Provide more specific error messages for common issues
-            if (strpos($e->getMessage(), 'Connection') !== false || strpos($e->getMessage(), 'timeout') !== false) {
-                $errorMessage .= "The database connection timed out. Please try again.";
-            } elseif (strpos($e->getMessage(), 'OpenAI') !== false) {
-                $errorMessage .= "There was an issue with the AI service. Please check your OpenAI API key configuration.";
-            } elseif (strpos($e->getMessage(), 'WordPress') !== false) {
-                $errorMessage .= "There was an issue connecting to WordPress. Please check your WordPress API settings.";
-            } else {
-                $errorMessage .= "Please try rephrasing your request or contact support if the issue persists.";
-            }
-            
             return response()->json([
-                'success' => false, 
-                'message' => $errorMessage
+                'success' => false,
+                'message' => \App\Support\ChatErrorMessages::fromException($e),
             ], 500);
         }
     }
@@ -1138,17 +1196,15 @@ class NLPController extends Controller
     }
 
     // ✅ Handles creative queries by using OpenAI directly (with optional data context)
-    private function handleCreativeQuery($userQuery)
+    private function handleCreativeQuery($userQuery, string $openaiKey = '')
     {
         Log::info("🎨 Handling creative query: '{$userQuery}'");
         
         try {
-            // Check if OpenAI API key is configured
-            $openaiKey = $this->configService->getOpenAIApiKey();
             if (empty($openaiKey)) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'OpenAI API Key is not configured. Please set it in the Hey Trisha Chatbot settings page.'
+                    'message' => \App\Support\ChatErrorMessages::openAiNotConfigured()
                 ], 500);
             }
             
@@ -1344,7 +1400,11 @@ class NLPController extends Controller
                       "- Use natural, conversational language\n" .
                       "- Be concise but informative\n" .
                       "- ⚠️⚠️⚠️ REMEMBER: This is an analytical tool - all suggestions must be based on REAL data from the database, not generic examples\n\n" .
-                      "IMPORTANT: Return ONLY the response text - no markdown, no code blocks, no JSON. Just plain, friendly text.\n\n" .
+                      ($this->wantsBulletList((string) $userQuery)
+                          ? "FORMATTING:\n- The user asked for a list. Respond as a bullet list with one item per line, each line starting with \"- \".\n- Do not write paragraphs.\n\n"
+                          : "FORMATTING:\n- If the user did not ask for a list, respond in 1–3 short paragraphs.\n- Only use bullet points when explicitly requested.\n\n"
+                      ) .
+                      "IMPORTANT: Return ONLY the response text - no code blocks, no JSON.\n\n" .
                       "Your Response:";
             
             // Call OpenAI for creative response
@@ -1421,6 +1481,131 @@ class NLPController extends Controller
         
         return preg_match($operationPattern, $query) && 
                (preg_match($wpTermsPattern, $query) || preg_match($idPattern, $query) || preg_match($propertyPattern, $query) || preg_match($directPropertyPattern, $query));
+    }
+
+    /**
+     * Detect if the user is explicitly asking for a list-style answer.
+     * We keep this conservative to avoid turning normal answers into lists.
+     */
+    private function wantsBulletList(string $query): bool
+    {
+        $q = strtolower(trim($query));
+
+        // Direct list intent
+        if (preg_match('/\b(list|bullet|bullets|steps|checklist|tips|ways|reasons|examples|ideas|recommendations)\b/i', $q)) {
+            return true;
+        }
+
+        // "Top 5 ...", "Give me 10 ...", "3 things ..."
+        if (preg_match('/\b(top|first|best)\s+\d+\b/i', $q)) {
+            return true;
+        }
+        if (preg_match('/\b\d+\s+(things|items|steps|tips|ways|reasons|examples|ideas)\b/i', $q)) {
+            return true;
+        }
+        if (preg_match('/^(give|show|provide|share)\s+me\s+\d+\b/i', $q)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Broader "show me the things" list intent (not only the word "list").
+     */
+    private function isEntityListQuery(string $query): bool
+    {
+        $q = strtolower(trim($query));
+        if ($this->wantsBulletList($q)) {
+            return true;
+        }
+        if (preg_match('/\b(all|every)\s+(the\s+)?(users?|user|authors?|admins?|administrators?|customers?|client|products?|items?|orders?|purchases?|transactions?)\b/i', $q)) {
+            return true;
+        }
+        if (preg_match('/\b(show|display|get|fetch|give|load|print)\b.*\b(users?|user|authors?|admins?|administrators?|customers?|client|products?|items?|orders?|purchases?|transactions?)\b/i', $q)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * When listing entities (users, products, …), we only want short bullets — not every DB column.
+     * Returns: user|customer|product|order|null
+     */
+    private function compactListEntityKind(?string $userQuery): ?string
+    {
+        if ($userQuery === null || $userQuery === '') {
+            return null;
+        }
+        $q = strtolower(trim($userQuery));
+        if (!$this->isEntityListQuery($q)) {
+            return null;
+        }
+        if (preg_match('/\b(users?|user|authors?|admins?|administrators?|subscribers?|editors?|contributors?|members?)\b/i', $q)) {
+            return 'user';
+        }
+        if (preg_match('/\b(customers?|clients?|buyers?|shoppers?)\b/i', $q)) {
+            return 'customer';
+        }
+        if (preg_match('/\b(products?|items?|skus?)\b/i', $q)) {
+            return 'product';
+        }
+        if (preg_match('/\b(orders?|purchases?|transactions?)\b/i', $q)) {
+            return 'order';
+        }
+        return null;
+    }
+
+    /**
+     * At most 2 short fields per row for list-style answers; never include secrets.
+     */
+    private function pickCompactListFieldsForRow(array $row, string $kind): array
+    {
+        $sensitive = '/(_pass$|_hash$|^pass$|password|user_pass|user_activation|session|token|secret|api_key|nonce|salt)/i';
+        $out         = [];
+        if ($kind === 'user' || $kind === 'customer') {
+            $order = $kind === 'user'
+                ? ['display_name', 'name', 'user_login', 'user_nicename', 'user_email', 'user_url']
+                : ['customer_name', 'Customer Name', 'display_name', 'name', 'first_name', 'last_name', 'billing_email', 'user_email', 'email', 'Email'];
+        } elseif ($kind === 'product') {
+            $order = ['post_title', 'product_name', 'Product Name', 'name', 'title', 'sku', 'SKU'];
+        } elseif ($kind === 'order') {
+            $order = ['order_number', 'order_id', 'id', 'ID', 'order_key', 'status', 'date_created', 'post_date', 'date'];
+        } else {
+            $order = [];
+        }
+        foreach ($order as $k) {
+            if (!array_key_exists($k, $row)) {
+                continue;
+            }
+            $v = $row[$k];
+            if ($v === null || $v === '') {
+                continue;
+            }
+            if (is_string($k) && preg_match($sensitive, $k)) {
+                continue;
+            }
+            $out[$k] = is_scalar($v) ? (string) $v : json_encode($v);
+            if (count($out) >= 2) {
+                break;
+            }
+        }
+        if (!empty($out)) {
+            return $out;
+        }
+        foreach ($row as $k => $v) {
+            if (!is_string($k) || !is_scalar($v) || $v === '' || $v === null) {
+                continue;
+            }
+            if (preg_match($sensitive, $k)) {
+                continue;
+            }
+            $out[$k] = (string) $v;
+            if (count($out) >= 2) {
+                break;
+            }
+        }
+        return $out;
     }
 
     // ✅ Returns helpful response for unrecognized queries
@@ -1625,7 +1810,7 @@ class NLPController extends Controller
      * ✅ Analyze SQL results and generate human-friendly, analytical response
      * Uses OpenAI to analyze data and provide insights in conversational format
      */
-    private function analyzeResultsAndGenerateResponse($userQuery, $result, $sqlQuery)
+    private function analyzeResultsAndGenerateResponse($userQuery, $result, $sqlQuery, string $openaiKey = '')
     {
         try {
             // Validate result is a proper array
@@ -1639,7 +1824,9 @@ class NLPController extends Controller
             
             // If result is empty or has error message, return simple message
             if (empty($result) || (isset($result['message']) && !isset($result[0]))) {
-                $message = isset($result['message']) ? $result['message'] : "I couldn't find any data matching your request.";
+                $message = isset($result['message'])
+                    ? $result['message']
+                    : ChatErrorMessages::emptyQueryResults($userQuery);
                 return [
                     'message' => $message,
                     'analysis' => null
@@ -1658,58 +1845,86 @@ class NLPController extends Controller
             // Prepare data summary for OpenAI
             $dataSummary = $this->prepareDataSummary($result, $userQuery);
             
-            // Get OpenAI API key
-            $apiKey = $this->configService->getOpenAIApiKey();
-            if (!$apiKey) {
-                // Fallback to simple summary if no API key
+            // Use the plugin-supplied key (no .env fallback)
+            $apiKey = $openaiKey;
+            if (empty($apiKey)) {
                 return $this->generateSimpleSummary($userQuery, $result);
             }
             
             // Build prompt for analysis
-            $prompt = "You are a helpful AI assistant analyzing WordPress/WooCommerce data. Your role is to provide clear, friendly, and insightful responses.\n\n" .
-                     "User's Question: \"$userQuery\"\n\n" .
-                     "Data Retrieved:\n$dataSummary\n\n" .
-                     "⚠️⚠️⚠️ CRITICAL INSTRUCTIONS:\n" .
+            $wantsBullets = $this->wantsBulletList((string) $userQuery);
+            $compactKind  = $this->compactListEntityKind((string) $userQuery);
+            $compactList  = $wantsBullets && $compactKind !== null;
+            $formattingRule = $wantsBullets
+                ? ($compactList
+                    ? "FORMATTING (compact list):\n- The user asked for a list. Respond with one bullet per line, each line starting with \"- \".\n- Each line must be SHORT: at most the 1–2 fields shown in \"Data Retrieved\" (e.g. display name, login, or email). Do not paste extra columns, metadata, or \"all details from the row\".\n- Do not write paragraphs.\n\n"
+                    : "FORMATTING:\n- The user asked for a list. Respond as a bullet list with one item per line, each line starting with \"- \".\n- Do not write paragraphs.\n\n")
+                : "FORMATTING:\n- If the user did not ask for a list, respond in 1–3 short paragraphs.\n- Only use bullet points when explicitly requested.\n\n";
+
+            $dataRules = "⚠️⚠️⚠️ CRITICAL INSTRUCTIONS:\n" .
                      "- Use ONLY the actual data provided above - DO NOT invent, guess, or create placeholder data\n" .
-                     "- If the data shows customer names, use those EXACT names - DO NOT use placeholders like '[Customer 2]', '[Customer 3]'\n" .
-                     "- If the data shows 5 customers, list all 5 with their actual names from the data\n" .
-                     "- If the data shows product names, use those EXACT names - DO NOT create generic examples\n" .
-                     "- All information must come from the data provided above\n\n" .
-                     "Your Task:\n" .
+                     "- If the data shows customer or user display names, use those EXACT values - DO NOT use placeholders like '[Customer 2]'\n" .
+                     "- If the data shows product or order labels, use those EXACT values - DO NOT create generic examples\n" .
+                     "- All information must come from the data provided above\n\n";
+
+            if ($compactList) {
+                $task = "Your Task:\n" .
+                     "1. The user wanted a simple list — not a full data dump\n" .
+                     "2. Output ONE bullet per record using ONLY the 1–2 short fields in the data summary (e.g. name and username OR email), nothing else\n" .
+                     "3. You may add ONE optional line at the top with the total count if helpful\n" .
+                     "4. Never include passwords, API keys, tokens, activation keys, or long serialized/meta fields\n\n" .
+                     "Response Guidelines:\n" .
+                     "- Use the ACTUAL count from the data\n" .
+                     "- List each item in the same order as the data when practical\n" .
+                     "- If fewer rows than requested, say the actual number found\n" .
+                     "- For currency totals only when relevant, format amounts nicely (e.g. '\$1,234.56')\n\n";
+            } else {
+                $task = "Your Task:\n" .
                      "1. Analyze the data and understand what the user is asking\n" .
                      "2. Provide a friendly, conversational response that answers their question\n" .
                      "3. Include key insights and numbers in a natural, human way\n" .
-                     "4. If showing specific items (customers, products, orders, etc.), mention them by their ACTUAL names from the data\n" .
-                     "5. For customer queries: List each customer with their actual name, email, and other details from the data\n" .
+                     "4. If showing specific items (customers, products, orders, etc.), mention them by their ACTUAL names or identifiers from the data\n" .
+                     "5. For customer or user *detail* queries (not a simple \"list\"), you may include name, email, and other fields that appear in the data summary\n" .
                      "6. For analytical queries (totals, counts, trends), provide context and insights\n" .
                      "7. Be concise but informative - don't just list numbers, explain what they mean\n" .
                      "8. Use friendly, conversational language - like you're explaining to a colleague\n\n" .
                      "Response Guidelines:\n" .
-                     "- Start with a friendly acknowledgment of their question\n" .
+                     "- Start with a friendly acknowledgment of their question when appropriate\n" .
                      "- Present the key findings clearly\n" .
-                     "- ⚠️⚠️⚠️ CRITICAL: Use the ACTUAL count from the data - if the data shows 1 customer, say '1 customer', NOT '5 customers'\n" .
-                     "- Use natural language (e.g., 'I found 1 customer' if data shows 1, 'I found 5 customers' if data shows 5)\n" .
-                     "- If showing a list of customers/products, list ALL of them with their ACTUAL names from the data\n" .
-                     "- For customer lists: Show each customer's actual name, email, and relevant details from the data\n" .
-                     "- If the data shows fewer customers than requested (e.g., asked for 5 but only 1 exists), mention the actual number found\n" .
-                     "- DO NOT use placeholders like '[Customer 2]', '[Product Name]' - use the ACTUAL names from the data\n" .
-                     "- DO NOT claim to have found more customers than are actually in the data\n" .
-                     "- For totals/amounts, format numbers nicely (e.g., '$1,234.56' not '1234.56')\n" .
-                     "- End with a helpful note if relevant\n\n" .
-                     "IMPORTANT: Return ONLY the response text - no markdown, no code blocks, no JSON. Just plain, friendly text.\n\n" .
+                     "- ⚠️⚠️⚠️ CRITICAL: Use the ACTUAL count from the data\n" .
+                     "- Use natural language (e.g. 'I found 1 customer' if data shows 1)\n" .
+                     "- If listing many items, still prefer clarity over dumping every field unless the user asked for full details\n" .
+                     "- If the data shows fewer results than requested, mention the actual number found\n" .
+                     "- DO NOT use placeholders - use the ACTUAL names and values from the data\n" .
+                     "- DO NOT claim to have more rows than the data provides\n" .
+                     "- For totals/amounts, format numbers nicely (e.g. '\$1,234.56' not '1234.56')\n" .
+                     "- End with a helpful note if relevant\n\n";
+            }
+
+            $prompt = "You are a helpful AI assistant analyzing WordPress/WooCommerce data. Your role is to provide clear, friendly, and insightful responses.\n\n" .
+                     "User's Question: \"$userQuery\"\n\n" .
+                     "Data Retrieved:\n$dataSummary\n\n" .
+                     $dataRules .
+                     $task .
+                     $formattingRule .
+                     "IMPORTANT: Return ONLY the response text - no code blocks, no JSON.\n\n" .
                      "Your Response:";
             
             // Call OpenAI for analysis
+            $systemMsg = $compactList
+                ? 'You are a helpful AI assistant that answers using ONLY the data provided. For simple "list" questions, output a short bullet list: one line per item and at most 1–2 fields per line (e.g. name and email or username). Never dump all columns, passwords, tokens, or long metadata from a row.'
+                : 'You are a helpful AI assistant that analyzes data and provides friendly, conversational responses. ⚠️ CRITICAL: You MUST use ONLY the actual data provided from the user\'s database. DO NOT invent, guess, or create placeholder data. All information must come from the actual database results provided.';
+
             $response = \Illuminate\Support\Facades\Http::withHeaders([
                 'Authorization' => 'Bearer ' . $apiKey,
                 'Content-Type' => 'application/json'
             ])->timeout(15)->post('https://api.openai.com/v1/chat/completions', [
                 'model' => 'gpt-3.5-turbo',
                 'messages' => [
-                    ['role' => 'system', 'content' => 'You are a helpful AI assistant that analyzes data and provides friendly, conversational responses. ⚠️ CRITICAL: You MUST use ONLY the actual data provided from the user\'s database. DO NOT invent, guess, or create placeholder data. All information must come from the actual database results provided.'],
+                    ['role' => 'system', 'content' => $systemMsg],
                     ['role' => 'user', 'content' => $prompt],
                 ],
-                'max_tokens' => 500,
+                'max_tokens' => $compactList ? 1200 : 500,
                 'temperature' => 0.7
             ]);
             
@@ -1773,6 +1988,7 @@ class NLPController extends Controller
         // Extract any limit from user query, otherwise use all available records
         $queryLower = strtolower($userQuery ?? '');
         $isCustomerQuery = strpos($queryLower, 'customer') !== false;
+        $compactKind = $this->compactListEntityKind($userQuery);
         
         // Try to extract a number from the query (e.g., "5 customers", "10 products")
         $maxRecords = null;
@@ -1795,10 +2011,34 @@ class NLPController extends Controller
         $summary = "Total records: " . count($result) . "\n\n";
         
         if (count($sampleData) > 0) {
-            $summary .= ($isCustomerQuery ? "Customer data (all " . count($sampleData) . " records):\n" : "Sample data:\n");
+            if ($compactKind !== null) {
+                $summary .= "List summary (" . $compactKind . "): " . count($sampleData) . " row(s) — at most 2 short fields per item (no full row dump):\n";
+            } else {
+                $summary .= ($isCustomerQuery ? "Customer data (all " . count($sampleData) . " records):\n" : "Sample data:\n");
+            }
             foreach ($sampleData as $index => $row) {
                 if (is_object($row)) {
                     $row = (array)$row;
+                }
+
+                if ($compactKind !== null) {
+                    $compact = $this->pickCompactListFieldsForRow($row, $compactKind);
+                    if (empty($compact)) {
+                        $summary .= "  - (no safe display fields in row " . ($index + 1) . ")\n";
+                    } else {
+                        $parts = [];
+                        foreach ($compact as $cKey => $cVal) {
+                            if (is_numeric($cVal)) {
+                                $cKeyLower = strtolower((string) $cKey);
+                                if (strpos($cKeyLower, 'id') !== false && strpos($cKeyLower, 'order') === false) {
+                                    $cVal = (int) $cVal;
+                                }
+                            }
+                            $parts[] = ucwords(str_replace('_', ' ', (string) $cKey)) . ': ' . $cVal;
+                        }
+                        $summary .= '  - ' . implode(' | ', $parts) . "\n";
+                    }
+                    continue;
                 }
                 
                 // For customer queries, use more descriptive labels with actual customer name
@@ -1882,7 +2122,9 @@ class NLPController extends Controller
     private function generateSimpleSummary($userQuery, $result)
     {
         if (empty($result) || (is_array($result) && isset($result['message']))) {
-            $message = is_array($result) && isset($result['message']) ? $result['message'] : "I couldn't find any data matching your request.";
+            $message = is_array($result) && isset($result['message'])
+                ? $result['message']
+                : ChatErrorMessages::emptyQueryResults($userQuery);
             return [
                 'message' => $message,
                 'analysis' => null
@@ -2012,6 +2254,39 @@ class NLPController extends Controller
                 return [
                     'message' => $message,
                     'analysis' => null
+                ];
+            }
+        }
+
+        // Compact bullet list (users / products / orders / customers) — not a full row dump
+        $compactKindSummary = $this->compactListEntityKind($userQuery);
+        if ($compactKindSummary !== null && $this->isEntityListQuery($userQuery) && $count > 0) {
+            $maxList = 100;
+            $lines     = [];
+            $take = min($count, $maxList);
+            for ($i = 0; $i < $take; $i++) {
+                $row = is_object($result[$i]) ? (array) $result[$i] : $result[$i];
+                $compact = $this->pickCompactListFieldsForRow($row, $compactKindSummary);
+                if (empty($compact)) {
+                    continue;
+                }
+                $parts = [];
+                foreach ($compact as $k => $v) {
+                    if (is_numeric($v) && strpos(strtolower((string) $k), 'id') !== false) {
+                        $v = (int) $v;
+                    }
+                    $parts[] = ucwords(str_replace('_', ' ', (string) $k)) . ': ' . $v;
+                }
+                if (!empty($parts)) {
+                    $lines[] = '- ' . implode(' | ', $parts);
+                }
+            }
+            if (!empty($lines)) {
+                $more = $count > $take ? "\n(" . ($count - $take) . " more not shown here.)" : '';
+                $noun = $compactKindSummary . ($count > 1 ? 's' : '');
+                return [
+                    'message' => "I found " . $count . " " . $noun . " (short list, not all columns):\n" . implode("\n", $lines) . $more,
+                    'analysis'  => null,
                 ];
             }
         }
@@ -2805,5 +3080,50 @@ class NLPController extends Controller
                "I can also edit your content - you can edit posts or products by name or ID. " .
                "And I can create new posts or products for you. " .
                "Try rephrasing your request in a different way, or ask me 'What can you do?' and I'll explain all my capabilities!";
+    }
+
+    /**
+     * Defense-in-depth: redact sensitive fields/values from any result payload.
+     * This intentionally errs on the side of removing data.
+     *
+     * @param mixed $data
+     * @return mixed
+     */
+    private function redactSensitiveResultsFallback($data)
+    {
+        $sensitiveKeyPattern = '/(password|pass|pwd|secret|token|api[_-]?key|consumer[_-]?secret|authorization|auth|session|cookie|card|cvc|cvv|pan|user_pass|pm_)/i';
+        $sensitiveValuePatterns = [
+            // OpenAI / common API key styles
+            '/\bsk-[A-Za-z0-9]{10,}\b/',
+            '/\bpk_(live|test)_[A-Za-z0-9]{10,}\b/',
+            '/\bsk_(live|test)_[A-Za-z0-9]{10,}\b/',
+            '/\bwhsec_[A-Za-z0-9]{10,}\b/',
+            // Stripe-ish identifiers
+            '/\b(pm|pi|tok)_[A-Za-z0-9]{10,}\b/',
+            // Laravel APP_KEY-ish
+            '/\bbase64:[A-Za-z0-9+\/]{20,}={0,2}\b/',
+        ];
+
+        if (is_array($data)) {
+            $out = [];
+            foreach ($data as $k => $v) {
+                $key = is_string($k) ? $k : $k;
+                if (is_string($key) && preg_match($sensitiveKeyPattern, $key)) {
+                    continue;
+                }
+                $out[$k] = $this->redactSensitiveResultsFallback($v);
+            }
+            return $out;
+        }
+
+        if (is_string($data)) {
+            foreach ($sensitiveValuePatterns as $p) {
+                if (preg_match($p, $data)) {
+                    return '[REDACTED]';
+                }
+            }
+        }
+
+        return $data;
     }
 }
